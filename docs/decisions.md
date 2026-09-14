@@ -747,3 +747,12 @@ The shared ×1.3–1.8 put 3.5's code above its band (1,119 vs ~770–1,060) and
 
 **Supersedes:** nothing. It fills the 3.4b carry-forward "3.4c's weekend-exposure signal reads `overlay.base` for the uncapped score" — it reads the **capped** score and records the base beside it.
 
+---
+
+## 2026-09-14 — 6.0 ops alerting: a successful night download logs nothing
+
+**Decision:** added to Phase 6's item 6.0 list. `get_night_quotes` logs only a partial or empty answer, so a normal night download leaves no line at all — no ticker set, no request count, no elapsed time. 3.2's core download behaves the same. 6.0 gives both cadences one INFO line per download, or an equivalent counter.
+
+**Why:** the first production night check (2026-09-14 20:45 UTC) could not be reviewed from the log alone; only the check's own summary line and the stored row existed.
+
+**Supersedes:** N/A — it extends the 2026-09-10 entry's 6.0 list, which is append-only.
