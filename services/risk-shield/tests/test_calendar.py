@@ -108,6 +108,69 @@ def test_shipped_calendar_matches_spec_table():
                       "fomc": "FOMC rate decision"}
 
 
+# ── Part 3.4c decision 7: the `event` type ───────────────────────
+
+def _with_events(*rows):
+    body = copy.deepcopy(VALID)
+    body["events"].extend(rows)
+    return body
+
+
+def _event(day="2026-09-20", time="14:00", title="EU tariff deadline"):
+    return {"date": day, "time": time, "type": "event", "title": title, "detail": "hand-added"}
+
+
+def test_event_type_is_accepted_on_a_weekend(tmp_path):
+    """A Sunday row is the point: it is when the market cannot react."""
+    calendar = econ_calendar.load(_write(tmp_path, _with_events(_event())), today=TODAY)
+    row = [e for e in calendar["events"] if e["type"] == "event"]
+    assert len(row) == 1 and row[0]["date"] == date(2026, 9, 20)
+    assert date(2026, 9, 20).weekday() == 6
+
+
+def test_two_events_can_share_a_date_at_different_times(tmp_path):
+    """The duplicate rule is (date, time, type): two situations, one Sunday."""
+    body = _with_events(_event(time="09:00", title="OPEC meeting"),
+                        _event(time="21:00", title="Ceasefire deadline"))
+    calendar = econ_calendar.load(_write(tmp_path, body), today=TODAY)
+    events = [e["title"] for e in calendar["events"] if e["type"] == "event"]
+    assert events == ["OPEC meeting", "Ceasefire deadline"]      # sorted by time
+
+
+def test_two_events_at_the_same_time_are_still_a_duplicate(tmp_path):
+    body = _with_events(_event(title="A"), _event(title="B"))
+    with pytest.raises(CalendarUnavailable, match="duplicate event on 2026-09-20 at 14:00"):
+        econ_calendar.load(_write(tmp_path, body), today=TODAY)
+
+
+def test_sources_still_cover_only_the_three_scheduled_types(tmp_path):
+    """`event` rows have no upstream page, so `sources` must not want one."""
+    assert econ_calendar.SOURCE_TYPES == ("fomc", "cpi", "jobs")
+    assert econ_calendar.EVENT_TYPES == ("fomc", "cpi", "jobs", "event")
+    body = _with_events(_event())
+    body["sources"]["event"] = "https://example.com"
+    with pytest.raises(CalendarUnavailable, match=r"sources: missing \[\], unexpected \['event'\]"):
+        econ_calendar.load(_write(tmp_path, body), today=TODAY)
+
+
+def test_renewal_message_names_only_the_scheduled_sources(tmp_path):
+    calendar = econ_calendar.load(_write(tmp_path, _with_events(_event())), today=TODAY)
+    message = econ_calendar.renewal_message(calendar)
+    assert "federalreserve.gov" in message and "bls.gov" in message
+    assert message.count("https://") == 3
+
+
+def test_event_rows_reach_the_window_unchanged(tmp_path):
+    """window() is untouched by decision 7: an event row flows through it
+    like any other, in time order, with the same keys."""
+    calendar = econ_calendar.load(_write(tmp_path, _with_events(_event())), today=TODAY)
+    body = econ_calendar.window(calendar, _et(2026, 9, 18, 15, 30).astimezone(timezone.utc), 7)
+    row = [e for e in body["events"] if e["type"] == "event"]
+    assert len(row) == 1
+    assert set(row[0]) == {"date", "time", "datetimeUtc", "type", "title", "detail", "released"}
+    assert row[0]["released"] is False and row[0]["datetimeUtc"] == "2026-09-20T18:00:00+00:00"
+
+
 BAD = [
     ("not-json", "{nope", "not valid JSON"),
     ("not-an-object", [], "calendar: expected an object"),
@@ -126,7 +189,10 @@ BAD = [
     ("blank-title", _mutated(lambda b: b["events"][0].update(title="  ")), "events[0].title"),
     ("missing-detail", _mutated(lambda b: b["events"][0].pop("detail")), "events[0]: missing ['detail']"),
     ("outside-coverage", _mutated(lambda b: b["events"][0].update(date="2027-01-05")), "outside coverage"),
-    ("duplicate", _mutated(lambda b: b["events"].append(dict(b["events"][0], time="15:00"))), "duplicate fomc on 2026-09-16"),
+    # Part 3.4c decision 7 moved the duplicate rule to (date, time, type),
+    # so the clash has to share the time now; the 15:00 copy is legal below.
+    ("duplicate", _mutated(lambda b: b["events"].append(dict(b["events"][0]))),
+     "duplicate fomc on 2026-09-16 at 14:00"),
 ]
 
 

@@ -2,7 +2,9 @@
 TradingFirm — the hand-maintained economic calendar (Part 3.5 decision 8).
 
 data/econ_calendar.json lists FOMC decisions, CPI releases and jobs reports
-for a stated coverage window, copied by hand from the Fed and BLS pages. It
+for a stated coverage window, copied by hand from the Fed and BLS pages,
+plus free-text `event` rows (Part 3.4c decision 7) for anything else that
+lands while the market is shut: a tariff deadline, a summit, a vote. It
 is the only calendar source: nothing here calls an API (Finnhub's
 /calendar/economic is likely premium, plan §2).
 
@@ -31,7 +33,13 @@ logger = logging.getLogger(__name__)
 ET = ZoneInfo("America/New_York")
 CALENDAR_PATH = Path(__file__).parent / "data" / "econ_calendar.json"
 TIMEZONE = "America/New_York"
-EVENT_TYPES = ("fomc", "cpi", "jobs")
+# fomc / cpi / jobs are the scheduled releases the file is renewed from.
+# `event` (Part 3.4c decision 7) is a hand-added free-text row — a tariff
+# deadline, a summit, a vote — allowed on any date, weekends included,
+# because that is exactly when a weekend-exposure read needs one. It has
+# no upstream page, so `sources` still covers the three scheduled types.
+EVENT_TYPES = ("fomc", "cpi", "jobs", "event")
+SOURCE_TYPES = ("fomc", "cpi", "jobs")
 RENEWAL_DAYS = 14
 
 _TOP_KEYS = {"coversFrom", "coversThrough", "timezone", "retrieved", "sources", "events"}
@@ -85,7 +93,7 @@ def validate(raw: Any) -> dict:
     retrieved = _date(raw["retrieved"], "retrieved")
 
     sources = raw["sources"]
-    _keys(sources, set(EVENT_TYPES), "sources")
+    _keys(sources, set(SOURCE_TYPES), "sources")
     for kind, url in sources.items():
         if not isinstance(url, str) or not url.startswith("https://"):
             raise CalendarUnavailable(f"sources.{kind}: expected an https URL")
@@ -107,9 +115,12 @@ def validate(raw: Any) -> dict:
             raise CalendarUnavailable(f"{where}.detail: expected a string")
         if not covers_from <= day <= covers_through:
             raise CalendarUnavailable(f"{where}.date: {day} is outside coverage {covers_from}…{covers_through}")
-        if (day, item["type"]) in seen:
-            raise CalendarUnavailable(f"{where}: duplicate {item['type']} on {day}")
-        seen.add((day, item["type"]))
+        # (date, time, type), not (date, type): two `event` rows can share a
+        # Sunday (3.4c decision 7), while a second 14:00 FOMC stays a mistake.
+        if (day, item["time"], item["type"]) in seen:
+            raise CalendarUnavailable(
+                f"{where}: duplicate {item['type']} on {day} at {item['time']}")
+        seen.add((day, item["time"], item["type"]))
         events.append({"date": day, "time": item["time"], "type": item["type"],
                        "title": item["title"].strip(), "detail": item["detail"]})
 
@@ -125,7 +136,7 @@ def coverage_short(calendar: dict, today: date) -> bool:
 
 def renewal_message(calendar: dict) -> str:
     renew_by = calendar["coversThrough"] - timedelta(days=RENEWAL_DAYS)
-    urls = ", ".join(calendar["sources"][kind] for kind in EVENT_TYPES)
+    urls = ", ".join(calendar["sources"][kind] for kind in SOURCE_TYPES)
     return (f"Econ calendar covers through {calendar['coversThrough']}: renew by {renew_by} "
             f"from {urls} (CLAUDE.md, calendar renewal)")
 
