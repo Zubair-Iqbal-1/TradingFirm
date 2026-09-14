@@ -270,3 +270,34 @@ async def test_night_check_has_no_weekend_key(monkeypatch):
     out = await scheduler.run_check(make_state(), scheduler.KIND_NIGHT, clock=lambda: at)
     assert out is None                                    # no pool: the night check skips
     assert seen == {}
+
+
+class FailingPool:
+    """A pool whose insert always fails; the settle read answers nothing."""
+
+    def __init__(self):
+        self.inserts = 0
+
+    async def fetchrow(self, sql, *args):
+        return None
+
+    async def execute(self, *args):
+        self.inserts += 1
+        raise RuntimeError("boom: insert")
+
+
+@pytest.mark.asyncio
+async def test_insert_failure_after_block(monkeypatch, caplog):
+    """F11: 3.4's unchanged behaviour with a block present — the publish has
+    already happened, the failed insert is a WARNING, the block is intact."""
+    patch_compute(monkeypatch)
+    patch_assemble(monkeypatch)
+    at = et(2026, 9, 18, 15, 30).astimezone(timezone.utc)
+    state = make_state(db_pool=FailingPool())
+    with caplog.at_level(logging.WARNING):
+        out = await scheduler.run_check(state, scheduler.KIND_MARKET, clock=lambda: at)
+    assert out["health"]["weekend"]["level"] == weekend.LEVEL_ELEVATED
+    assert out["published"]["published"] is True
+    assert out["errors"] == ["insert: RuntimeError"]
+    assert state.check_status["weekendLevel"] == weekend.LEVEL_ELEVATED
+    assert state.db_pool.inserts == 1

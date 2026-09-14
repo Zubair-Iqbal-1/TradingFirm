@@ -136,6 +136,10 @@ def health_indicators(health: dict, kind: str, settle: Optional[dict],
         # Part 3.4b: the futures prices this check saw, and the cap it applied.
         "futures": health.get("futures") or {},
         "overlay": health.get("overlay"),
+        # Part 3.4c: the weekend-exposure block, null off-window and on every
+        # row written before 3.4c. It is guarded against non-finite numbers
+        # before it gets here, so it can never be what raises below.
+        "weekend": health.get("weekend"),
     }, allow_nan=False)
 
 

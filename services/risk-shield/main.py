@@ -10,7 +10,8 @@ Responsibilities:
 Endpoints:
   GET /health             — service health: dependency state at boot, scheduler state
   GET /                   — service info
-  GET /market/health      — the latest health check (Postgres only, Part 3.4)
+  GET /market/health      — the latest health check (Postgres only, Part 3.4),
+                            with its weekend-exposure block (Part 3.4c)
   GET /market/indicators  — the six monitors of the latest check
   GET /market/history     — checks over the last ?days=1..90 (default 30)
   GET /market/calendar    — FOMC / CPI / jobs dates for ?days=1..31 (default 7),
@@ -263,6 +264,8 @@ async def health():
         # Part 3.4: whether this process schedules checks, and its last one.
         "schedulerEnabled": settings.scheduler_enabled,
         "lastCheckAt": (getattr(app.state, "check_status", None) or {}).get("lastCheckAt"),
+        # Part 3.4c: the last weekend block, and whether the write route is on.
+        **_weekend_health(),
         # Part 3.5: calendar coverage, recomputed against today on every call.
         **_calendar_health(),
         # Part 3.5: the market news poller.
@@ -374,6 +377,9 @@ async def market_health():
         # Part 3.4b: the futures cap this check applied, null on a settle row
         # and on every row written before 3.4b.
         "overlay": ind.get("overlay"),
+        # Part 3.4c: the weekend-exposure block, null except on a weekend-eve
+        # session's last eight rows, and on every row written before 3.4c.
+        "weekend": ind.get("weekend"),
         # Part 3.5 addition 8: the news feed's state, from process memory at
         # request time — the only values on this route not from Postgres.
         **news_poller.stale_view(app.state, _now()),
@@ -403,6 +409,8 @@ async def market_indicators():
         # Part 3.4b: the futures prices the check saw, and the cap it applied.
         "futures": ind.get("futures"),
         "overlay": ind.get("overlay"),
+        # Part 3.4c: the weekend-exposure block of that same row.
+        "weekend": ind.get("weekend"),
     }
 
 
@@ -447,6 +455,19 @@ def _news_health() -> dict:
         "newsLastError": status.get("lastError"),
         "finnhubConfigured": settings.finnhub_configured,
     }
+
+
+def _weekend_health() -> dict:
+    """/health's weekend fields (W5): the last block this process built, and
+    whether the situation route has a secret — the boolean only, never the
+    value (G14). The flag's own text is not read here: /health runs on every
+    Docker healthcheck, and a Redis round trip per 10 s buys nothing the
+    block and the PUT response do not already show."""
+    status = getattr(app.state, "check_status", None) or {}
+    return {"weekendLevel": status.get("weekendLevel"),
+            "weekendReasonCount": status.get("weekendReasonCount"),
+            "weekendDropped": status.get("weekendDropped"),
+            "weekendWriteConfigured": settings.weekend_write_configured}
 
 
 def _calendar_health() -> dict:

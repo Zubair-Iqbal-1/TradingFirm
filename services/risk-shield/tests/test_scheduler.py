@@ -154,7 +154,10 @@ async def test_run_check_order_compute_publish_insert(monkeypatch):
     assert body["kind"] == "market"
     assert (body["settleScore"], body["settleCheckedAt"]) == (70, et(2026, 9, 9, 16, 20).isoformat())
     assert state.check_status == {"lastCheckAt": MARKET_AT.astimezone(timezone.utc).isoformat(),
-                                  "lastKind": "market", "lastScore": 72, "lastError": None}
+                                  "lastKind": "market", "lastScore": 72, "lastError": None,
+                                  # Part 3.4c: a Thursday 10:00 check is off-window.
+                                  "weekendLevel": None, "weekendReasonCount": None,
+                                  "weekendDropped": None}
     assert result["published"] == {"published": True, "reason": "initial"}
 
 

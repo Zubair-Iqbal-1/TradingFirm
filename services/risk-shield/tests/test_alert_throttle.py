@@ -228,6 +228,7 @@ async def test_publish_payload_shape_and_channel(monkeypatch):
         "newsPollStale": None, "lastNewsPollAt": None, "newsLastError": None,     # Part 3.5, no view passed
         "pausedSeconds": None,                                                    # 3.4 follow-up, no pause
         "kind": None, "overlay": None,                                            # Part 3.4b, no kind passed
+        "weekend": None,                                                          # Part 3.4c, off-window
     }
     bad = health(30)
     bad["coverage"] = float("nan")
@@ -242,7 +243,7 @@ async def test_payload_keys_append_only_paused_seconds():
         "score", "regime", "reason", "recovery", "previousScore", "previousRegime",
         "trend", "stale", "coverage", "checkedAt", "monitors",
         "newsPollStale", "lastNewsPollAt", "newsLastError", "pausedSeconds",
-        "kind", "overlay")
+        "kind", "overlay", "weekend")
     assert alert_manager.NEWS_KEYS == ("newsPollStale", "lastNewsPollAt", "newsLastError")
     r = FakeRedis()
     await publish_health(r, health(72), None, now=NOW)
@@ -324,7 +325,7 @@ def test_state_key_namespace():
 @pytest.mark.asyncio
 async def test_payload_keys_append_only_kind_overlay():
     """Part 3.4b: kind and overlay are appended after pausedSeconds."""
-    assert alert_manager.PAYLOAD_KEYS[-2:] == ("kind", "overlay")
+    assert alert_manager.PAYLOAD_KEYS[-3:] == ("kind", "overlay", "weekend")
     record = {"status": "applied", "movePct": -3.2, "esPct": -3.2, "nqPct": -3.0,
               "base": 68, "cap": 39, "capped": True}
     snapshot = health(39)

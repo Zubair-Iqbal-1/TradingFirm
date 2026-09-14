@@ -121,6 +121,7 @@ def test_market_health_returns_latest_row(client_with):
         "checkedAt": at.isoformat(), "kind": "market", "coverage": 100, "stale": False,
         "newsPollStale": None, "lastNewsPollAt": None, "newsLastError": None,   # Part 3.5, poller off
         "overlay": None,                                                        # Part 3.4b, a pre-3.4b row
+        "weekend": None,                                                        # Part 3.4c, a pre-3.4c row
     }
     assert "previousScore" not in body               # the last publish lives in pub/sub only
     assert len(pool.calls) == 1                       # no lastScored query for a scored row
@@ -169,7 +170,8 @@ def test_market_indicators_returns_monitors(client_with):
     body = client_with(ReadPool(latest=row(at=at))).get("/market/indicators").json()
     assert body == {"checkedAt": at.isoformat(), "kind": "market", "coverage": 100,
                     "inputs": INPUTS, "monitors": MONITORS,
-                    "futures": None, "overlay": None}        # Part 3.4b, a pre-3.4b row
+                    "futures": None, "overlay": None,        # Part 3.4b, a pre-3.4b row
+                    "weekend": None}                         # Part 3.4c, a pre-3.4c row
     assert {m["weight"] for m in body["monitors"].values()} == {25, 20, 15, 10}
 
 

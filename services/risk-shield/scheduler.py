@@ -460,6 +460,7 @@ async def run_check(state, kind: str, *, clock: Callable[[], datetime] = _utc_no
         lastKind=kind,
         lastScore=health["score"],
         lastError="; ".join(errors) or None,
+        **weekend_status(health.get("weekend"), getattr(state, "weekend_dropped", None)),
     )
     logger.info(
         f"Health check ({kind}): {health['regime']} {health['score']}, trend {trend}, "
@@ -476,6 +477,13 @@ def _base_score_as_of(health: dict) -> Optional[str]:
     raw = ((health.get("monitors") or {}).get("spy_trend") or {}).get("raw") or {}
     date_ = raw.get("date")
     return date_ if isinstance(date_, str) else None
+
+
+def weekend_status(block: Optional[dict], dropped: Optional[str]) -> dict:
+    """/health's three weekend keys (W5), from the block this check built."""
+    return {"weekendLevel": block["level"] if block else None,
+            "weekendReasonCount": len(block["reasons"]) if block else None,
+            "weekendDropped": dropped}
 
 
 async def weekend_block(state, health: dict, kind: str, now: datetime) -> Optional[dict]:
@@ -594,8 +602,11 @@ async def run_night_check(state, *, clock: Callable[[], datetime] = _utc_now) ->
     except Exception as e:
         _failure("insert", e, errors)
 
+    # A night check never carries a block (3.4c decision 5's ruling): it runs
+    # no monitors and has no quotes view, so it has no live input to read.
     state.check_status.update(lastCheckAt=health["checkedAt"], lastKind=KIND_NIGHT,
-                              lastScore=score, lastError="; ".join(errors) or None)
+                              lastScore=score, lastError="; ".join(errors) or None,
+                              **weekend_status(None, None))
     logger.info(
         f"Night check: {health['regime']} {score} (settle {settle['score']}, "
         f"{record['status']} {record['movePct'] if record['movePct'] is None else round(record['movePct'], 2)}%), "

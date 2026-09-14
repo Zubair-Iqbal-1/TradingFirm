@@ -49,7 +49,10 @@ PAYLOAD_KEYS = ("score", "regime", "reason", "recovery", "previousScore", "previ
                 # Part 3.4 follow-up addition 1: host pause before this check. Append-only.
                 "pausedSeconds",
                 # Part 3.4b: which cadence ran, and the futures cap it applied.
-                "kind", "overlay")
+                "kind", "overlay",
+                # Part 3.4c: the weekend-exposure block, non-null only on a
+                # weekend-eve session's last eight rows. Append-only.
+                "weekend")
 NEWS_KEYS = PAYLOAD_KEYS[11:14]
 
 
@@ -96,7 +99,8 @@ def build_payload(health: dict, last: Optional[dict], reason: str, trend: Option
                   kind: Optional[str] = None) -> dict:
     """previousScore / previousRegime are the last *published* values (Part
     5: "from last alert"); the trend base is a different thing (settle*).
-    The news keys and pausedSeconds ride along on a publish; neither causes one."""
+    The news keys, pausedSeconds and the weekend block ride along on a
+    publish; none of them causes one."""
     news = news or {}
     return {
         "score": health["score"],
@@ -114,6 +118,7 @@ def build_payload(health: dict, last: Optional[dict], reason: str, trend: Option
         "pausedSeconds": paused_seconds,
         "kind": kind,
         "overlay": health.get("overlay"),
+        "weekend": health.get("weekend"),
     }
 
 

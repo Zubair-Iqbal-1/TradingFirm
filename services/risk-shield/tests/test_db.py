@@ -144,6 +144,7 @@ async def test_insert_health_check_sql_and_params():
         "settleScore": 70, "settleCheckedAt": "2026-09-09T20:20:00+00:00",
         "pausedSeconds": None,                                  # 3.4 follow-up addition 2, no pause
         "futures": {}, "overlay": None,                         # Part 3.4b, a settle check
+        "weekend": None,                                        # Part 3.4c, off-window
     }
     # No settle base; a NaN never reaches SQL.
     health["monitors"]["vix"]["raw"] = {"level": float("nan")}
