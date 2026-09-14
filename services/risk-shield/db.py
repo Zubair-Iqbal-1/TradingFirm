@@ -98,6 +98,16 @@ ORDER BY checked_at DESC
 LIMIT 1
 """
 
+# The overlay reference (Part 3.4b decision 6): the same row settle_base finds,
+# with its indicators, so a check can read the futures prices that settle saw.
+SETTLE_REFERENCE_SQL = """
+SELECT checked_at, score, regime, indicators
+FROM risk.health_checks
+WHERE indicators->>'kind' = 'settle' AND score IS NOT NULL AND checked_at < $1
+ORDER BY checked_at DESC
+LIMIT 1
+"""
+
 # Two fields out of the JSONB as text, never the whole blob (~4 KB a row).
 HEALTH_HISTORY_SQL = """
 SELECT checked_at, score, regime, trend,
@@ -123,6 +133,9 @@ def health_indicators(health: dict, kind: str, settle: Optional[dict],
         "settleScore": settle["score"] if settle else None,
         "settleCheckedAt": settle["checkedAt"].isoformat() if settle else None,
         "pausedSeconds": paused_seconds,
+        # Part 3.4b: the futures prices this check saw, and the cap it applied.
+        "futures": health.get("futures") or {},
+        "overlay": health.get("overlay"),
     }, allow_nan=False)
 
 
@@ -157,6 +170,23 @@ async def settle_base(pool, before: datetime) -> Optional[dict]:
     if row is None:
         return None
     return {"score": row["score"], "checkedAt": row["checked_at"]}
+
+
+async def settle_reference(pool, before: datetime) -> Optional[dict]:
+    """{score, checkedAt, regime, futures} of the latest scored settle before
+    `before`, or None. `futures` is that settle's stored block, {} when the row
+    predates 3.4b or its JSONB has the wrong shape."""
+    row = await pool.fetchrow(SETTLE_REFERENCE_SQL, before)
+    if row is None:
+        return None
+    try:
+        indicators = _json_value(row["indicators"]) if "indicators" in row else None
+    except ValueError:      # a corrupt blob is no reference, never a raised read (as /market/health)
+        indicators = None
+    futures = indicators.get("futures") if isinstance(indicators, dict) else None
+    return {"score": row["score"], "checkedAt": row["checked_at"],
+            "regime": row["regime"] if "regime" in row else None,
+            "futures": futures if isinstance(futures, dict) else {}}
 
 
 def _json_bool(text: Any) -> Optional[bool]:

@@ -143,6 +143,7 @@ async def test_insert_health_check_sql_and_params():
         "monitors": {"vix": {"score": 60}}, "inputs": {"source": "last_known"},
         "settleScore": 70, "settleCheckedAt": "2026-09-09T20:20:00+00:00",
         "pausedSeconds": None,                                  # 3.4 follow-up addition 2, no pause
+        "futures": {}, "overlay": None,                         # Part 3.4b, a settle check
     }
     # No settle base; a NaN never reaches SQL.
     health["monitors"]["vix"]["raw"] = {"level": float("nan")}
@@ -247,3 +248,25 @@ async def test_macro_brief_queries():
     assert (op, args) == ("fetchval", (AT, end))
     assert _flat(sql) == ("SELECT EXISTS (SELECT 1 FROM risk.macro_briefs "
                           "WHERE trigger = 'slot' AND generated_at >= $1 AND generated_at < $2)")
+
+
+@pytest.mark.asyncio
+async def test_settle_reference_query():
+    """Part 3.4b decision 6: the same row settle_base finds, with its futures."""
+    before = datetime(2026, 9, 10, 13, 30, tzinfo=timezone.utc)
+    futures = {"ES=F": {"price": 5000.0, "date": "2026-09-09", "asOf": "x", "stale": False}, "NQ=F": None}
+    pool = _RecordingPool(row={"checked_at": PREV, "score": 70, "regime": "HEALTHY",
+                               "indicators": json.dumps({"kind": "settle", "futures": futures})})
+    assert await db.settle_reference(pool, before) == {
+        "score": 70, "checkedAt": PREV, "regime": "HEALTHY", "futures": futures}
+    [(op, sql, args)] = pool.calls
+    assert op == "fetchrow" and args == (before,)
+    assert _flat(sql) == ("SELECT checked_at, score, regime, indicators FROM risk.health_checks "
+                          "WHERE indicators->>'kind' = 'settle' AND score IS NOT NULL AND checked_at < $1 "
+                          "ORDER BY checked_at DESC LIMIT 1")
+    # A row from before 3.4b, a corrupt blob, a wrong-shaped one: no reference, never a raise.
+    for stored in (json.dumps({"kind": "settle"}), "not json {", json.dumps([1, 2]), None):
+        pool = _RecordingPool(row={"checked_at": PREV, "score": 70, "regime": "HEALTHY",
+                                   "indicators": stored})
+        assert (await db.settle_reference(pool, before))["futures"] == {}
+    assert await db.settle_reference(_RecordingPool(row=None), before) is None

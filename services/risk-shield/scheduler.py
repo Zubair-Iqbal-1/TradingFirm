@@ -30,8 +30,10 @@ import db
 import news_poller
 import wallclock
 from monitors import quotes
+from scoring import overlay
 from scoring.alert_manager import publish_health
 from scoring.health_calculator import compute_health
+from scoring.regime_classifier import classify
 
 logger = logging.getLogger(__name__)
 
@@ -282,11 +284,15 @@ def trend_from(score: Optional[int], settle_score: Optional[int]) -> Optional[st
     return "stable"
 
 
-def settle_cutoff(now: datetime) -> datetime:
-    """The trend base must be older than this: the XNYS open of `now`'s ET
-    date, so the 16:20 settle check reads an earlier session's settle and
-    never its own. ET midnight on a date that is not a session."""
+def settle_cutoff(now: datetime, kind: str = KIND_MARKET) -> datetime:
+    """The trend base and the overlay reference must be older than this: the
+    XNYS open of `now`'s ET date, so the 16:20 settle check reads an earlier
+    session's settle and never its own. ET midnight on a date that is not a
+    session. A night check reads the latest settle there is — that day's, once
+    it exists — so its cutoff is `now` (3.4b decision 6)."""
     _require_aware(now)
+    if kind == KIND_NIGHT:
+        return now
     day = now.astimezone(ET).date()
     try:
         bounds = session_bounds(day)
@@ -327,9 +333,19 @@ async def run_check(state, kind: str, *, clock: Callable[[], datetime] = _utc_no
     settle = None
     if pool is not None:
         try:
-            settle = await db.settle_base(pool, settle_cutoff(checked_at))
+            settle = await db.settle_reference(pool, settle_cutoff(checked_at, kind))
         except Exception as e:
             _failure("settle base read", e, errors)
+
+    # The futures cap (3.4b decisions 4 and 5), on the prices this check already
+    # downloaded. The settle check is exempt: it is the reference, and its
+    # monitors read the day's complete bars.
+    health["overlay"] = None
+    if kind != KIND_SETTLE:
+        health["score"], health["overlay"] = overlay.apply_overlay(
+            health["score"], (settle or {}).get("futures"), health.get("futures") or {})
+        health["regime"] = classify(health["score"])
+
     trend = trend_from(health["score"], settle["score"] if settle else None)
 
     published = None
@@ -339,7 +355,7 @@ async def run_check(state, kind: str, *, clock: Callable[[], datetime] = _utc_no
     try:
         published = await publish_health(r, health, trend, now=checked_at,
                                          news=news_poller.stale_view(state, checked_at),
-                                         paused_seconds=paused)
+                                         paused_seconds=paused, kind=kind)
     except Exception as e:
         _failure("publish", e, errors)
 

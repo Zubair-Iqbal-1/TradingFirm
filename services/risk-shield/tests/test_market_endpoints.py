@@ -120,6 +120,7 @@ def test_market_health_returns_latest_row(client_with):
         "message": "Elevated risk — trade with caution",
         "checkedAt": at.isoformat(), "kind": "market", "coverage": 100, "stale": False,
         "newsPollStale": None, "lastNewsPollAt": None, "newsLastError": None,   # Part 3.5, poller off
+        "overlay": None,                                                        # Part 3.4b, a pre-3.4b row
     }
     assert "previousScore" not in body               # the last publish lives in pub/sub only
     assert len(pool.calls) == 1                       # no lastScored query for a scored row
@@ -167,7 +168,8 @@ def test_market_indicators_returns_monitors(client_with):
     at = datetime.now(timezone.utc) - timedelta(minutes=1)
     body = client_with(ReadPool(latest=row(at=at))).get("/market/indicators").json()
     assert body == {"checkedAt": at.isoformat(), "kind": "market", "coverage": 100,
-                    "inputs": INPUTS, "monitors": MONITORS}
+                    "inputs": INPUTS, "monitors": MONITORS,
+                    "futures": None, "overlay": None}        # Part 3.4b, a pre-3.4b row
     assert {m["weight"] for m in body["monitors"].values()} == {25, 20, 15, 10}
 
 
@@ -248,3 +250,28 @@ def test_market_endpoints_read_only_repeat_call(client_with):
             first.pop("ageSeconds"), second.pop("ageSeconds")
         assert first == second, path
     assert all(op in ("fetchrow", "fetch") for op, _, _ in pool.calls)
+
+
+OVERLAY = {"status": "applied", "movePct": -3.2, "esPct": -3.2, "nqPct": -3.0,
+           "base": 68, "cap": 39, "capped": True}
+FUTURES = {"ES=F": {"price": 4840.0, "date": "2026-09-10", "asOf": INPUTS["asOf"], "stale": False},
+           "NQ=F": None}
+
+
+def test_market_health_serves_night_overlay(client_with):
+    """Part 3.4b: a night row carries its cap; a row written before 3.4b has none."""
+    night = row(score=39, regime="DANGER", trend="declining",
+                ind=indicators(kind="night", overlay=OVERLAY, futures=FUTURES))
+    body = client_with(ReadPool(latest=night)).get("/market/health").json()
+    assert (body["kind"], body["score"], body["regime"]) == ("night", 39, "DANGER")
+    assert body["overlay"] == OVERLAY
+    assert client_with(ReadPool(latest=row())).get("/market/health").json()["overlay"] is None
+
+
+def test_market_indicators_futures_and_overlay(client_with):
+    night = row(score=39, regime="DANGER", ind=indicators(kind="night", overlay=OVERLAY, futures=FUTURES))
+    body = client_with(ReadPool(latest=night)).get("/market/indicators").json()
+    assert body["futures"] == FUTURES and body["overlay"] == OVERLAY
+    assert body["monitors"] == MONITORS                     # the settle's monitors, copied by the night check
+    old = client_with(ReadPool(latest=row())).get("/market/indicators").json()
+    assert old["futures"] is None and old["overlay"] is None

@@ -227,6 +227,7 @@ async def test_publish_payload_shape_and_channel(monkeypatch):
         "coverage": 100, "checkedAt": NOW.isoformat(), "monitors": {"vix": 30, "breadth": None},
         "newsPollStale": None, "lastNewsPollAt": None, "newsLastError": None,     # Part 3.5, no view passed
         "pausedSeconds": None,                                                    # 3.4 follow-up, no pause
+        "kind": None, "overlay": None,                                            # Part 3.4b, no kind passed
     }
     bad = health(30)
     bad["coverage"] = float("nan")
@@ -236,11 +237,12 @@ async def test_publish_payload_shape_and_channel(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_payload_keys_append_only_paused_seconds():
-    """3.4 follow-up addition 1: pausedSeconds is appended; the 14 earlier keys keep their order."""
+    """3.4 follow-up addition 1 and 3.4b: keys are appended, never reordered."""
     assert alert_manager.PAYLOAD_KEYS == (
         "score", "regime", "reason", "recovery", "previousScore", "previousRegime",
         "trend", "stale", "coverage", "checkedAt", "monitors",
-        "newsPollStale", "lastNewsPollAt", "newsLastError", "pausedSeconds")
+        "newsPollStale", "lastNewsPollAt", "newsLastError", "pausedSeconds",
+        "kind", "overlay")
     assert alert_manager.NEWS_KEYS == ("newsPollStale", "lastNewsPollAt", "newsLastError")
     r = FakeRedis()
     await publish_health(r, health(72), None, now=NOW)
@@ -317,3 +319,22 @@ def test_state_key_namespace():
     for bad in ("", "  ", None, 3):
         with pytest.raises(ValueError):
             cache.state_key(bad)
+
+
+@pytest.mark.asyncio
+async def test_payload_keys_append_only_kind_overlay():
+    """Part 3.4b: kind and overlay are appended after pausedSeconds."""
+    assert alert_manager.PAYLOAD_KEYS[-2:] == ("kind", "overlay")
+    record = {"status": "applied", "movePct": -3.2, "esPct": -3.2, "nqPct": -3.0,
+              "base": 68, "cap": 39, "capped": True}
+    snapshot = health(39)
+    snapshot["overlay"] = record
+    r = FakeRedis()
+    await publish_health(r, snapshot, "declining", now=NOW, kind="night")
+    [(_, payload)] = messages(r)
+    assert tuple(payload) == alert_manager.PAYLOAD_KEYS
+    assert payload["kind"] == "night" and payload["overlay"] == record
+    # A check that passes neither (3.4's callers) still publishes both as null.
+    r = FakeRedis()
+    await publish_health(r, health(72), None, now=NOW)
+    assert messages(r)[0][1]["kind"] is None and messages(r)[0][1]["overlay"] is None

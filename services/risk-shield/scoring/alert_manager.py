@@ -47,7 +47,9 @@ PAYLOAD_KEYS = ("score", "regime", "reason", "recovery", "previousScore", "previ
                 # Part 3.5 addition 8: the news feed's state (news_poller.stale_view)
                 "newsPollStale", "lastNewsPollAt", "newsLastError",
                 # Part 3.4 follow-up addition 1: host pause before this check. Append-only.
-                "pausedSeconds")
+                "pausedSeconds",
+                # Part 3.4b: which cadence ran, and the futures cap it applied.
+                "kind", "overlay")
 NEWS_KEYS = PAYLOAD_KEYS[11:14]
 
 
@@ -90,7 +92,8 @@ def decide(last: Optional[dict], health: dict, now: datetime) -> tuple[bool, Opt
 
 
 def build_payload(health: dict, last: Optional[dict], reason: str, trend: Optional[str],
-                  news: Optional[dict] = None, paused_seconds: Optional[int] = None) -> dict:
+                  news: Optional[dict] = None, paused_seconds: Optional[int] = None,
+                  kind: Optional[str] = None) -> dict:
     """previousScore / previousRegime are the last *published* values (Part
     5: "from last alert"); the trend base is a different thing (settle*).
     The news keys and pausedSeconds ride along on a publish; neither causes one."""
@@ -109,6 +112,8 @@ def build_payload(health: dict, last: Optional[dict], reason: str, trend: Option
         "monitors": {name: m.get("score") for name, m in (health.get("monitors") or {}).items()},
         **{key: news.get(key) for key in NEWS_KEYS},
         "pausedSeconds": paused_seconds,
+        "kind": kind,
+        "overlay": health.get("overlay"),
     }
 
 
@@ -128,7 +133,8 @@ async def read_state(r) -> Optional[dict]:
 
 
 async def publish_health(r, health: dict, trend: Optional[str], *, now: datetime,
-                         news: Optional[dict] = None, paused_seconds: Optional[int] = None) -> dict:
+                         news: Optional[dict] = None, paused_seconds: Optional[int] = None,
+                         kind: Optional[str] = None) -> dict:
     """Publish on settings.health_channel if decide() says so. Returns
     {published, reason}. Never raises for a Redis state; a payload that is
     not strict JSON (a NaN from a monitor bug) raises ValueError. `news` is
@@ -143,7 +149,8 @@ async def publish_health(r, health: dict, trend: Optional[str], *, now: datetime
     if not publish:
         return {"published": False, "reason": None}
 
-    message = json.dumps(build_payload(health, last, reason, trend, news, paused_seconds), allow_nan=False)
+    message = json.dumps(build_payload(health, last, reason, trend, news, paused_seconds, kind),
+                         allow_nan=False)
     channel = settings.health_channel
     try:
         await r.publish(channel, message)

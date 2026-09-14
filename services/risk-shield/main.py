@@ -363,6 +363,9 @@ async def market_health():
         "kind": ind.get("kind"),
         "coverage": ind.get("coverage"),
         "stale": ind.get("stale"),
+        # Part 3.4b: the futures cap this check applied, null on a settle row
+        # and on every row written before 3.4b.
+        "overlay": ind.get("overlay"),
         # Part 3.5 addition 8: the news feed's state, from process memory at
         # request time — the only values on this route not from Postgres.
         **news_poller.stale_view(app.state, _now()),
@@ -389,6 +392,9 @@ async def market_indicators():
         "coverage": ind.get("coverage"),
         "inputs": ind.get("inputs"),
         "monitors": _valid_monitors(ind.get("monitors")),
+        # Part 3.4b: the futures prices the check saw, and the cap it applied.
+        "futures": ind.get("futures"),
+        "overlay": ind.get("overlay"),
     }
 
 

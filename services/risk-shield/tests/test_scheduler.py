@@ -71,7 +71,9 @@ class FakePool:
         if not matches:
             return None
         best = max(matches, key=lambda r: r["checked_at"])
-        return {"checked_at": best["checked_at"], "score": best["score"]}
+        return {"checked_at": best["checked_at"], "score": best["score"],
+                "regime": classify(best["score"]),
+                "indicators": json.dumps({"kind": "settle", "futures": best.get("futures") or {}})}
 
     async def execute(self, sql, *args):
         if self.fail_insert:
@@ -79,10 +81,21 @@ class FakePool:
         self.inserts.append(args)
         self.log.append("insert")
         checked_at, score, _regime, _trend, indicators = args
-        self.rows.append({"checked_at": checked_at, "score": score, "kind": json.loads(indicators)["kind"]})
+        body = json.loads(indicators)
+        row = {"checked_at": checked_at, "score": score, "kind": body["kind"]}
+        if any((body.get("futures") or {}).values()):
+            row["futures"] = body["futures"]      # only when a price was seen, so 3.4's row asserts read clean
+        self.rows.append(row)
 
 
-def snapshot(score, at, *, nan=False):
+def fut(es=None, nq=None, at="2026-09-10T14:00:00+00:00"):
+    """A futures block: what a check saw, or what a settle stored (3.4b)."""
+    return {ticker: None if price is None else
+            {"price": price, "date": "2026-09-10", "asOf": at, "stale": False}
+            for ticker, price in (("ES=F", es), ("NQ=F", nq))}
+
+
+def snapshot(score, at, *, nan=False, futures=None):
     return {
         "score": score,
         "regime": classify(score),
@@ -93,16 +106,17 @@ def snapshot(score, at, *, nan=False):
         "monitors": {"vix": {"score": score, "raw": {"level": math.nan if nan else 18.0},
                              "detail": "", "stale": False, "weight": 25}},
         "inputs": {"asOf": at.isoformat(), "source": "cached", "reason": None, "staleTickers": []},
+        "futures": fut() if futures is None else futures,
     }
 
 
-def patch_compute(monkeypatch, log, score, *, nan=False):
+def patch_compute(monkeypatch, log, score, *, nan=False, futures=None):
     calls = []
 
     async def fake(r, memory, *, now):
         calls.append({"r": r, "memory": memory, "now": now()})
         log.append("compute")
-        return snapshot(score, now(), nan=nan)
+        return snapshot(score, now(), nan=nan, futures=futures)
 
     monkeypatch.setattr(scheduler, "compute_health", fake)
     return calls
@@ -203,7 +217,8 @@ async def test_trend_against_previous_session_settle(monkeypatch):
     # Today's settle row now exists; a second settle check still reads yesterday's.
     assert state.db_pool.rows[-1] == {"checked_at": SETTLE_AT, "score": 72, "kind": "settle"}
     again = await scheduler.run_check(state, "settle", clock=Clock(SETTLE_AT + timedelta(minutes=1)))
-    assert again["settle"] == {"score": 60, "checkedAt": et(2026, 9, 9, 16, 20)}
+    # Part 3.4b: the read is settle_reference, so the dict also carries regime and futures.
+    assert (again["settle"]["score"], again["settle"]["checkedAt"]) == (60, et(2026, 9, 9, 16, 20))
 
     # Yesterday's settle had a null score → the latest scored settle before today's open.
     state = make_state([], rows=[
@@ -212,7 +227,7 @@ async def test_trend_against_previous_session_settle(monkeypatch):
     ])
     patch_compute(monkeypatch, [], 60)
     result = await scheduler.run_check(state, "market", clock=Clock(MARKET_AT))
-    assert result["settle"] == {"score": 58, "checkedAt": et(2026, 9, 8, 16, 20)}
+    assert (result["settle"]["score"], result["settle"]["checkedAt"]) == (58, et(2026, 9, 8, 16, 20))
     assert result["trend"] == "stable"
     assert json.loads(state.db_pool.inserts[0][4])["settleCheckedAt"] == et(2026, 9, 8, 16, 20).isoformat()
 
@@ -496,3 +511,68 @@ async def test_loop_cancel_is_clean(monkeypatch):
     with pytest.raises(asyncio.CancelledError):
         await task
     assert task.cancelled()
+
+
+# ── The futures cap on market and settle checks (Part 3.4b decisions 4-5) ──
+
+SETTLE_WITH_FUTURES = dict(YESTERDAY_SETTLE, futures={
+    "ES=F": {"price": 5000.0, "date": "2026-09-09", "asOf": "2026-09-09T20:20:02+00:00", "stale": False},
+    "NQ=F": {"price": 20000.0, "date": "2026-09-09", "asOf": "2026-09-09T20:20:02+00:00", "stale": False}})
+
+
+@pytest.mark.asyncio
+async def test_market_check_capped_by_futures_move(monkeypatch):
+    log = []
+    state = make_state(log, rows=[SETTLE_WITH_FUTURES])
+    patch_compute(monkeypatch, log, 68, futures=fut(4840.0, 19400.0))      # ES −3.2 %, NQ −3.0 %
+    result = await scheduler.run_check(state, "market", clock=Clock(MARKET_AT))
+
+    health = result["health"]
+    assert (health["score"], health["regime"]) == (39, "DANGER")           # min(68, cap 39)
+    record = health["overlay"]
+    assert (record["status"], record["base"], record["cap"], record["capped"]) == ("applied", 68, 39, True)
+    assert record["movePct"] == pytest.approx(-3.2)                        # the worse of the two
+    assert result["trend"] == "declining"                                  # 39 against the settle's 70
+    indicators = json.loads(state.db_pool.inserts[-1][4])
+    assert indicators["overlay"] == record and indicators["futures"]["ES=F"]["price"] == 4840.0
+    payload = json.loads(state.redis.published[-1][1])
+    assert payload["kind"] == "market" and payload["overlay"]["cap"] == 39 and payload["score"] == 39
+
+
+@pytest.mark.asyncio
+async def test_market_check_overlay_unavailable_keeps_monitors_score(monkeypatch):
+    # Nothing fresh to compare with: a stale or partial view carries no price.
+    state = make_state([], rows=[SETTLE_WITH_FUTURES])
+    patch_compute(monkeypatch, [], 68, futures=fut())
+    result = await scheduler.run_check(state, "market", clock=Clock(MARKET_AT))
+    assert result["health"]["score"] == 68 and result["health"]["overlay"]["status"] == "unavailable"
+
+    # A settle row written before 3.4b has no futures block, so there is no reference.
+    state = make_state([], rows=[YESTERDAY_SETTLE])
+    patch_compute(monkeypatch, [], 68, futures=fut(4000.0, 16000.0))
+    result = await scheduler.run_check(state, "market", clock=Clock(MARKET_AT))
+    assert result["health"]["score"] == 68 and result["health"]["overlay"]["status"] == "no_reference"
+
+
+@pytest.mark.asyncio
+async def test_settle_check_stores_futures_reference_uncapped(monkeypatch):
+    state = make_state([], rows=[SETTLE_WITH_FUTURES])
+    patch_compute(monkeypatch, [], 63, futures=fut(4750.0, 19000.0))       # −5 %, a crash day
+    result = await scheduler.run_check(state, "settle", clock=Clock(SETTLE_AT))
+
+    assert result["health"]["score"] == 63                                 # the settle is never capped
+    assert result["health"]["overlay"] is None
+    indicators = json.loads(state.db_pool.inserts[-1][4])
+    assert indicators["overlay"] is None
+    assert indicators["futures"]["ES=F"]["price"] == 4750.0                # tonight's reference
+    assert json.loads(state.redis.published[-1][1])["kind"] == "settle"
+
+
+def test_night_trend_base_is_latest_settle():
+    # Market and settle checks read the settle before their own session open.
+    assert scheduler.settle_cutoff(SETTLE_AT, "settle") == et(2026, 9, 10, 9, 30)
+    assert scheduler.settle_cutoff(MARKET_AT, "market") == et(2026, 9, 10, 9, 30)
+    assert scheduler.settle_cutoff(MARKET_AT) == et(2026, 9, 10, 9, 30)    # the default
+    # A night check reads the latest settle there is, including today's 16:20.
+    for at in (et(2026, 9, 10, 20, 15), et(2026, 9, 11, 7, 15), et(2026, 9, 12, 3, 15)):
+        assert scheduler.settle_cutoff(at, "night") == at

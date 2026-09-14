@@ -18,6 +18,7 @@ from typing import Callable
 
 from monitors.quotes import get_quotes_view
 from monitors.regime import MONITORS
+from scoring.overlay import futures_prices
 from scoring.regime_classifier import classify
 
 logger = logging.getLogger(__name__)
@@ -71,6 +72,9 @@ async def compute_health(r, memory, *, now: Callable[[], datetime] = _utc_now) -
     view = await get_quotes_view(r, memory, now=now)
     health = health_from_monitors(run_monitors(view))
     health["checkedAt"] = now().isoformat()
+    # The futures prices this check saw, for the row and for 3.4b's cap. No
+    # score depends on them here: the cap is applied by the scheduler.
+    health["futures"] = futures_prices(view)
     health["inputs"] = {
         "asOf": view["asOf"],
         "source": view["source"],
