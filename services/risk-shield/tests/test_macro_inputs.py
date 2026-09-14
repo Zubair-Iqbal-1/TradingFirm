@@ -31,11 +31,13 @@ MONITORS = {
 }
 
 
-def _row(at, *, score=68, regime="CAUTIOUS", trend="stable", kind="market", stale=False, monitors=MONITORS):
+def _row(at, *, score=68, regime="CAUTIOUS", trend="stable", kind="market", stale=False, monitors=MONITORS,
+         overlay=None):
     return {"checked_at": at, "score": score, "regime": regime, "trend": trend,
             "indicators": json.dumps({"kind": kind, "coverage": 100, "stale": stale,
                                       "staleMonitors": ["vix"] if stale else [], "monitors": monitors,
-                                      "inputs": {}, "settleScore": 63, "settleCheckedAt": None})}
+                                      "inputs": {}, "settleScore": 63, "settleCheckedAt": None,
+                                      "overlay": overlay})}
 
 
 class HealthPool:
@@ -100,6 +102,7 @@ async def test_inputs_health_from_latest_row():
         "staleMonitors": [],
         "monitors": {name: {"score": m["score"], "weight": m["weight"], "stale": False,
                             "detail": f"{name} detail"} for name, m in MONITORS.items()},
+        "overlay": None,                       # Part 3.4b: a market row with no cap in force
         "ageMinutes": 1, "lastExpectedSlotAt": et(2026, 9, 10, 14, 0).isoformat(),
     }
     assert "lastScored" not in health
@@ -755,3 +758,31 @@ def test_lifespan_closes_inputs_clients(monkeypatch):
     assert "fred closed" in events and "http closed" in events
     assert max(events.index("fred closed"), events.index("http closed")) < events.index("db closed")
     assert events.index("db closed") < events.index("redis closed")
+
+
+OVERLAY = {"status": "applied", "movePct": -3.2, "esPct": -3.2, "nqPct": -3.0,
+           "base": 63, "cap": 39, "capped": True}
+
+
+@pytest.mark.asyncio
+async def test_inputs_health_carries_overlay():
+    """Part 3.4b: the brief sees why a night score sits below the monitors'."""
+    now = et(2026, 9, 11, 7, 30)
+    night = _row(et(2026, 9, 11, 7, 15, 2), score=39, regime="DANGER", trend="declining",
+                 kind="night", overlay=OVERLAY)
+    health, _ = await macro_inputs.health_section(HealthPool(latest=night), now)
+    assert health["kind"] == "night" and health["score"] == 39
+    assert health["overlay"] == OVERLAY
+    assert health["monitors"] == {name: {"score": m["score"], "weight": m["weight"], "stale": False,
+                                         "detail": f"{name} detail"} for name, m in MONITORS.items()}
+    assert macro_inputs.health_ready(health) is True
+
+    # A settle row, and a row written before 3.4b, carry no overlay.
+    settle, _ = await macro_inputs.health_section(
+        HealthPool(latest=_row(et(2026, 9, 10, 16, 20, 2), kind="settle")), now)
+    assert settle["overlay"] is None
+    old_row = _row(et(2026, 9, 10, 16, 20, 2), kind="settle")
+    old_row["indicators"] = json.dumps({k: v for k, v in json.loads(old_row["indicators"]).items()
+                                        if k != "overlay"})
+    old, _ = await macro_inputs.health_section(HealthPool(latest=old_row), now)
+    assert old["overlay"] is None

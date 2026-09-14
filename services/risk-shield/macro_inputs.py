@@ -112,6 +112,10 @@ async def health_section(pool, now: datetime) -> tuple[dict, dict]:
         "stale": ind.get("stale"),
         "staleMonitors": ind.get("staleMonitors"),
         "monitors": _monitors(ind.get("monitors")),
+        # Part 3.4b: the futures cap this check applied, so the brief can say why
+        # a night score sits below what the monitors alone would give. Null on a
+        # settle row and on every row written before 3.4b.
+        "overlay": ind.get("overlay"),
         "ageMinutes": int((now - checked_at).total_seconds() // 60),
         "lastExpectedSlotAt": expected_at,
     }
