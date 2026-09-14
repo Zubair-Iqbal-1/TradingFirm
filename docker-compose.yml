@@ -147,6 +147,7 @@ services:
       DATA_ENGINE_URL: http://data-engine:8001      # Part 3.5: POST /news/ingest
       MACRO_BRIEF_ENABLED: "false"                  # Part 3.6a: stays off until ai-agent's /brief/macro (4.6)
       AI_AGENT_URL: http://ai-agent:8004            # Part 3.6b: POST /brief/macro
+      WEEKEND_WRITE_TOKEN: ${WEEKEND_WRITE_TOKEN:-}  # Part 3.4c: the situation route's shared secret; empty = route disabled
     restart: unless-stopped
 
   # Dev/test twin of risk-shield (Part 3.1), the same shape Part 0.7 gave
@@ -160,6 +161,7 @@ services:
   #   FRED_API_KEY=""        → nothing on 8013 can reach FRED (Part 3.2)
   #   FINNHUB_API_KEY=""     → nor Finnhub (Part 3.5)
   #   DATA_ENGINE_URL=data-engine-dev → news can only land in tradingfirm_dev (3.5)
+  #   WEEKEND_WRITE_TOKEN="" → the situation route answers 503 here (3.4c)
   #   database tradingfirm_dev, Redis DB 1 → can never write prod's tables
   #                                          or prod's cache keys
   # Create the dev database once with scripts/dev-db.sh (it applies every
@@ -191,6 +193,7 @@ services:
       DATA_ENGINE_URL: http://data-engine-dev:8001  # hard-coded: never prod's data-engine or database (3.5)
       MACRO_BRIEF_ENABLED: "false"                  # hard-coded: the twin never generates a brief (3.6a)
       AI_AGENT_URL: http://ai-agent.invalid:8004    # hard-coded: .invalid never resolves, no LLM from the twin (3.6a)
+      WEEKEND_WRITE_TOKEN: ""                       # hard-coded empty: the twin's situation route is disabled (3.4c)
     command: uvicorn main:app --host 0.0.0.0 --port 8003 --workers 1 --reload
     restart: "no"
 

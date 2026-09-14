@@ -726,3 +726,24 @@ The shared ×1.3–1.8 put 3.5's code above its band (1,119 vs ~770–1,060) and
 **Why:** 3.6b's new modules landed at ×1.87 and ×1.97 against B's ×1.6 top. Cut this way, 3.4b's `scoring/overlay.py` landed at 118 inside 105–161.
 
 **Supersedes:** the 2026-09-11 entry "Estimate bands revised on 3.6a actuals", for new-module code only.
+
+---
+
+## 2026-09-14 — The weekend-exposure signal (Part 3.4c)
+
+**Decision:** approved spec `docs/specs/3.4c.md` (v2). What later parts build on:
+
+- **A weekend-eve session** is the last XNYS session before a gap of ≥ 2 calendar days with no session, so a 3-day weekend is covered rather than missed. From **close − 30 min**, its seven market rows and its 16:20 settle carry a `weekend` block: eight rows.
+- **The level** is a weighted sum of reasons — regime, VIX level, VIX 5-day direction, calendar events between close and next open, pending-decision language in the news, the operator's situation flag. HIGH ≥ 4, ELEVATED 2–3, LOW 0–1, and `active_situation` alone is never HIGH: a level is HIGH only when two independent things agree. Provisional, like 3.3's and 3.4b's numbers.
+- **The regime reason reads the published (capped) score, not `overlay.base`.** A cap is never less cautious than the base, and a Friday intraday futures drop is what a weekend read must not ignore. Both scores are stored, so the log can be re-scored on the base later.
+- **What a 15:30 row actually sees:** five monitors score the previous session's complete bars, `vix` reads today's partial bar live, and the futures cap is measured since the previous settle. The block records `baseScoreAsOf`, `vixAsOf`, `vixPartial` and `quotesSource` so a row states its own staleness.
+- **Night rows carry no block.** A night check runs no monitors and has no quotes view, so its block would be the settle's numbers under a newer timestamp — worse than absent.
+- **The econ calendar gained a fourth type, `event`**: free text, any date including weekends, no `sources` entry. Without it the calendar input would be empty every weekend, since FOMC / CPI / jobs are weekday releases.
+- **A block can never fail a publish.** It is walked for non-finite values and dropped to null before `json.dumps(allow_nan=False)` sees it.
+- **`WEEKEND_WRITE_TOKEN`**: the situation route is the service's first write endpoint, so it ships with a shared secret (`X-TF-Token`, `hmac.compare_digest`) rather than waiting for going-public. Empty token = 503, never open.
+- **The log stores nothing new.** `GET /market/weekend/log` pairs each weekend's `levelAtClose` (15:55, the last row before the bell) and `levelAtSettle` with the ES=F / NQ=F move from the settle to the next session's first row, and grades the summary on `levelAtClose`.
+
+**Why:** the only useful moment for a weekend read is Friday afternoon while the market is open — a gap cannot be traded out of. Each bullet is where a plausible default would have made the read useless: a bare-summit keyword firing every week, a Thursday-before-a-holiday weekend going unscored, a night row overwriting the last live read, a NaN killing the publish.
+
+**Supersedes:** nothing. It fills the 3.4b carry-forward "3.4c's weekend-exposure signal reads `overlay.base` for the uncapped score" — it reads the **capped** score and records the base beside it.
+
