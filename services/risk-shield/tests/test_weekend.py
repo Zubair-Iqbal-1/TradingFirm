@@ -209,7 +209,8 @@ def test_phrases_pinned_to_spec():
         r"vote (?:on )?(?:sunday|saturday)",
         r"ceasefire (?:deadline|talks)",
         r"tariff deadline",
-        r"summit",
+        r"(?:g7|g20|nato|eu|weekend|sunday|saturday) summit",
+        r"summit (?:this weekend|on (?:sunday|saturday))",
         r"ahead of monday",
     )
 
@@ -218,7 +219,9 @@ def test_phrases_pinned_to_spec():
     ("Officials are EXPECTED TO ANNOUNCE a package", True),
     ("Deadline Sunday for the trade pact", True),
     ("Ceasefire talks resume", True),
-    ("Leaders hold a summit", True),
+    ("EU summit called for Sunday", True),
+    ("A summit on Saturday in Geneva", True),
+    ("Leaders hold a summit", False),              # a bare summit is any week
     ("Quarterly results beat estimates", False),
     ("The summitry of the 1980s", False),          # word boundary, not a substring
 ])
@@ -227,9 +230,10 @@ def test_phrase_matching_is_case_insensitive_and_bounded(text, hit):
 
 
 def test_match_records_the_phrase_and_caps_the_list():
-    matched = weekend.match_phrases(news(*[f"Summit number {i}" for i in range(9)])["items"])
+    matched = weekend.match_phrases(news(*[f"EU summit number {i}" for i in range(9)])["items"])
     assert len(matched) == weekend.MAX_NEWS
-    assert matched[0]["phrase"] == "summit" and matched[0]["source"] == "Reuters"
+    assert matched[0]["phrase"] == r"(?:g7|g20|nato|eu|weekend|sunday|saturday) summit"
+    assert matched[0]["source"] == "Reuters"
 
 
 def test_match_skips_junk_items_without_raising():

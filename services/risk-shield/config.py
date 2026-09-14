@@ -78,6 +78,13 @@ class Settings(BaseSettings):
     # (RFC 6761: it never resolves), so the twin can never reach an LLM.
     ai_agent_url: str = "http://ai-agent:8004"
 
+    # Weekend-exposure situation route (Part 3.4c decision 2). The shared
+    # secret for the service's first *write* endpoint, sent as X-TF-Token
+    # and compared with hmac.compare_digest. SecretStr like the API keys, so
+    # a repr() cannot leak it (G14). **Empty = the route answers 503, never
+    # falls open**; the dev twin is always empty.
+    weekend_write_token: SecretStr = SecretStr("")
+
     # Debug mode
     debug: bool = False
 
@@ -98,6 +105,12 @@ class Settings(BaseSettings):
     def finnhub_configured(self) -> bool:
         """Whether a Finnhub key is present, never the value (G14)."""
         return bool(self.finnhub_api_key.get_secret_value())
+
+    @property
+    def weekend_write_configured(self) -> bool:
+        """Whether the situation route has a secret, never the value (G14).
+        False = the route is disabled, which is the twin's state."""
+        return bool(self.weekend_write_token.get_secret_value())
 
 
 settings = Settings()

@@ -39,6 +39,9 @@ KIND_FRED = "fred"       # 3.2: one FRED series
 # refuses, cools down or comes back degraded (spec 3.3 decision 2).
 KIND_QUOTES_LAST = "quotes_last"
 KIND_NIGHT_QUOTES = "night_quotes"   # 3.4b: ES=F / NQ=F for a night check
+# 3.4c: the news items a Friday afternoon's weekend blocks share, so eight
+# rows cost about two calls to data-engine instead of eight.
+KIND_WEEKEND_NEWS = "weekend_news"
 
 # TTLs (seconds)
 TTL_QUOTES = 300     # 5 min (plan 3.2)
@@ -49,6 +52,7 @@ TTL_FRED = 21600     # 6 hours (plan 3.2)
 # 3.2 decision 3). Same number as data-engine's TTL_DOSSIER_ERROR.
 TTL_DEGRADED = 120
 TTL_NIGHT_QUOTES = 600   # under the 30-min night slot, so every slot downloads fresh (3.4b)
+TTL_WEEKEND_NEWS = 300   # 3.4c: one fetch per two 5-minute slots
 TTL_LAST_KNOWN = 86400   # 24 h: how long a last-known quotes body may stand in
 # 3.6a: the last *full* envelope per FRED series, served with stale: true when
 # the source refuses, cools down, errors or answers empty (spec 3.6a decision
@@ -61,6 +65,13 @@ TTL_FRED_LAST_KNOWN = 7 * 86400
 # throttle compares against. 7 days so a long-dead state cannot linger.
 STATE_HEALTH_PUBLISHED = "health_published"
 TTL_HEALTH_PUBLISHED = 7 * 86400
+
+# 3.4c: the operator's active-situation flag {text, setAt, expiresAt, setBy}.
+# Written only by PUT /market/weekend/situation, read by every check. Its TTL
+# comes from the caller's `hours`, bounded by SITUATION_MAX_HOURS, so a
+# forgotten flag dies on its own.
+STATE_WEEKEND_SITUATION = "weekend_situation"
+SITUATION_MAX_HOURS = 168
 
 # Source cooldowns (Part 3.2 decision 4, copied from data-engine 2.4): set
 # after a source refuses us, checked before any request. Source-wide — one

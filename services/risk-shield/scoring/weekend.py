@@ -119,7 +119,10 @@ PHRASES = (
     r"vote (?:on )?(?:sunday|saturday)",
     r"ceasefire (?:deadline|talks)",
     r"tariff deadline",
-    r"summit",
+    # A bare "summit" is any diplomatic meeting in any week; only a summit
+    # that is named or falls while the market is shut is a weekend input.
+    r"(?:g7|g20|nato|eu|weekend|sunday|saturday) summit",
+    r"summit (?:this weekend|on (?:sunday|saturday))",
     r"ahead of monday",
 )
 _PATTERNS = tuple((phrase, re.compile(rf"\b{phrase}\b", re.IGNORECASE)) for phrase in PHRASES)

@@ -20,11 +20,15 @@ Endpoints:
   GET /macro/brief        — the latest stored macro brief, Postgres only (Part 3.6b)
   POST /macro/brief/generate — one manual brief through ai-agent; 503 while
                             MACRO_BRIEF_ENABLED is false (Part 3.6b)
+  PUT /market/weekend/situation    — set the active-situation flag the weekend
+  DELETE /market/weekend/situation   block reads. The service's only write
+                            routes: X-TF-Token, 503 without a secret (Part 3.4c)
 
 Port: 8003
 """
 
 import asyncio
+import hmac
 import json
 import logging
 import math
@@ -33,9 +37,11 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
 
+import cache
 import config
 import db
 import econ_calendar
@@ -43,7 +49,9 @@ import macro_brief
 import macro_inputs
 import news_poller
 import scheduler
+import weekend_inputs
 from config import settings
+from scoring import weekend
 
 # ── Logging ──────────────────────────────────────────────────────
 
@@ -464,6 +472,74 @@ async def market_calendar(days: int = Query(CALENDAR_DAYS_DEFAULT, ge=1, le=CALE
     except econ_calendar.CalendarUnavailable:
         raise HTTPException(status_code=503, detail=CALENDAR_UNAVAILABLE_DETAIL) from None
     return econ_calendar.window(calendar, _now(), days)
+
+
+# ── /market/weekend/situation (Part 3.4c decision 2) ─────────────
+# The operator's "an unresolved thing is live" flag, which the weekend block
+# reads as one of its six inputs. These are the service's first *write*
+# routes, so they carry a shared secret from the start rather than waiting
+# for going-public: X-TF-Token, compared with hmac.compare_digest against
+# WEEKEND_WRITE_TOKEN. An empty token disables the routes (503) — it never
+# falls open, which is what the dev twin relies on.
+
+SITUATION_DISABLED_DETAIL = "weekend situation route disabled: no WEEKEND_WRITE_TOKEN"
+SITUATION_UNAUTHORIZED_DETAIL = "invalid or missing X-TF-Token"
+SITUATION_REDIS_DETAIL = "Redis unavailable: the situation flag cannot be stored"
+SITUATION_DEFAULT_HOURS = 72
+
+
+class SituationBody(BaseModel):
+    """The flag's text and how long it stands. `hours` is mandatory-by-default
+    and hard-bounded, so a forgotten flag dies on its own (spec D2)."""
+    text: str = Field(min_length=1, max_length=weekend.SITUATION_TEXT_MAX)
+    hours: int = Field(SITUATION_DEFAULT_HOURS, ge=1, le=cache.SITUATION_MAX_HOURS)
+
+
+def _require_write_token(token: Optional[str]) -> None:
+    """503 with no secret configured, 401 on a wrong one. The secret itself
+    never reaches a response, a log or an exception (G14)."""
+    secret = settings.weekend_write_token.get_secret_value()
+    if not secret:
+        raise HTTPException(status_code=503, detail=SITUATION_DISABLED_DETAIL)
+    if not token or not hmac.compare_digest(token, secret):
+        raise HTTPException(status_code=401, detail=SITUATION_UNAUTHORIZED_DETAIL)
+
+
+def _situation_redis():
+    r = getattr(app.state, "redis", None)
+    if r is None:
+        raise HTTPException(status_code=503, detail=SITUATION_REDIS_DETAIL)
+    return r
+
+
+@app.put("/market/weekend/situation")
+async def set_weekend_situation(body: SituationBody,
+                                x_tf_token: Optional[str] = Header(default=None)):
+    """Set the flag. 200 with the stored record (never the token)."""
+    _require_write_token(x_tf_token)
+    r = _situation_redis()
+    record = weekend_inputs.build_situation(body.text, body.hours, _now())
+    try:
+        await weekend_inputs.write_situation(r, record, body.hours)
+    except Exception as e:
+        logger.warning(f"Weekend situation write failed: {e!r}")
+        raise HTTPException(status_code=503, detail=SITUATION_REDIS_DETAIL) from None
+    logger.info(f"Weekend situation set for {body.hours}h, expires {record['expiresAt']}")
+    return record
+
+
+@app.delete("/market/weekend/situation")
+async def clear_weekend_situation(x_tf_token: Optional[str] = Header(default=None)):
+    """Clear the flag. 200 either way, `cleared` says whether one was set."""
+    _require_write_token(x_tf_token)
+    r = _situation_redis()
+    try:
+        cleared = await weekend_inputs.clear_situation(r)
+    except Exception as e:
+        logger.warning(f"Weekend situation delete failed: {e!r}")
+        raise HTTPException(status_code=503, detail=SITUATION_REDIS_DETAIL) from None
+    logger.info(f"Weekend situation cleared (was set: {cleared})")
+    return {"cleared": cleared}
 
 
 # ── /macro/brief/inputs (Part 3.6a, spec decision 7) ─────────────

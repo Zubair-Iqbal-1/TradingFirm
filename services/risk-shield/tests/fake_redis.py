@@ -9,13 +9,15 @@ without patching cache.py itself.
 
 
 class FakeRedis:
-    def __init__(self, *, fail_get=False, fail_set=False, fail_ttl=False, fail_publish=False):
+    def __init__(self, *, fail_get=False, fail_set=False, fail_ttl=False, fail_publish=False,
+                 fail_delete=False):
         self.store: dict[str, str] = {}
         self.ttls: dict[str, int] = {}
         self.fail_get = fail_get
         self.fail_set = fail_set
         self.fail_ttl = fail_ttl
         self.fail_publish = fail_publish
+        self.fail_delete = fail_delete    # Part 3.4c: the situation route's DELETE
         self.get_calls: list[str] = []
         self.set_calls: list[tuple[str, str, int]] = []
         self.published: list[tuple[str, str]] = []    # (channel, message), Part 3.4
@@ -50,6 +52,17 @@ class FakeRedis:
             return -2
         ex = self.ttls.get(key)
         return -1 if ex is None else ex
+
+    async def delete(self, *keys):
+        """Redis semantics: the number of keys that existed (Part 3.4c)."""
+        if self.fail_delete:
+            raise RuntimeError("boom: redis delete")
+        removed = 0
+        for key in keys:
+            if self.store.pop(key, None) is not None:
+                self.ttls.pop(key, None)
+                removed += 1
+        return removed
 
     async def ping(self):
         return True
