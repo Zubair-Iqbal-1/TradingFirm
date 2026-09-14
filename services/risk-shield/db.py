@@ -118,6 +118,33 @@ ORDER BY checked_at ASC
 """
 
 
+# Part 3.4c's log. Two reads, both bounded by `since`:
+#   1. every row carrying a weekend block — at most 8 a weekend-eve session,
+#      so ~200 over half a year. `weekend` and `futures` only, never the
+#      monitors blob.
+#   2. the first market row of each ET date, which is the "next open" side of
+#      the move. DISTINCT ON keeps it to one row per session (~130 a half
+#      year) instead of every 5-minute row.
+WEEKEND_ROWS_SQL = """
+SELECT checked_at, score, regime,
+       indicators->>'kind' AS kind,
+       indicators->'weekend' AS weekend,
+       indicators->'futures' AS futures
+FROM risk.health_checks
+WHERE checked_at >= $1 AND jsonb_typeof(indicators->'weekend') = 'object'
+ORDER BY checked_at ASC
+"""
+
+FIRST_MARKET_ROW_SQL = """
+SELECT DISTINCT ON ((checked_at AT TIME ZONE 'America/New_York')::date)
+       checked_at, score, regime,
+       indicators->'futures' AS futures
+FROM risk.health_checks
+WHERE checked_at >= $1 AND indicators->>'kind' = 'market'
+ORDER BY (checked_at AT TIME ZONE 'America/New_York')::date, checked_at ASC
+"""
+
+
 def health_indicators(health: dict, kind: str, settle: Optional[dict],
                       paused_seconds: Optional[int] = None) -> str:
     """The indicators JSONB for one check. allow_nan=False: a NaN from a
@@ -238,6 +265,21 @@ LAST_BRIEF_AT_SQL = """
 SELECT max(generated_at) FROM risk.macro_briefs
 WHERE $1::text IS NULL OR trigger = $1
 """
+
+
+async def weekend_rows(pool, since: datetime) -> list[dict]:
+    """Rows carrying a weekend block since `since`, ascending."""
+    rows = await pool.fetch(WEEKEND_ROWS_SQL, since)
+    return [{"checkedAt": row["checked_at"], "score": row["score"], "regime": row["regime"],
+             "kind": row["kind"], "weekend": _json_value(row["weekend"]),
+             "futures": _json_value(row["futures"])} for row in rows]
+
+
+async def first_market_rows(pool, since: datetime) -> list[dict]:
+    """The first market row of each ET date since `since`, ascending."""
+    rows = await pool.fetch(FIRST_MARKET_ROW_SQL, since)
+    return [{"checkedAt": row["checked_at"], "score": row["score"], "regime": row["regime"],
+             "futures": _json_value(row["futures"])} for row in rows]
 
 
 def _json_value(value: Any) -> Any:

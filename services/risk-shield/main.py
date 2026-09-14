@@ -16,6 +16,8 @@ Endpoints:
   GET /market/history     — checks over the last ?days=1..90 (default 30)
   GET /market/calendar    — FOMC / CPI / jobs dates for ?days=1..31 (default 7),
                             from data/econ_calendar.json only (Part 3.5)
+  GET /market/weekend/log — each weekend-eve session's level against the next
+                            session's opening move, ?weeks=1..52 (Part 3.4c)
   GET /macro/brief/inputs — the macro brief's inputs document with freshness
                             flags, reused for 60 s (Part 3.6a)
   GET /macro/brief        — the latest stored macro brief, Postgres only (Part 3.6b)
@@ -51,6 +53,7 @@ import macro_inputs
 import news_poller
 import scheduler
 import weekend_inputs
+import weekend_log
 from config import settings
 from scoring import weekend
 
@@ -494,6 +497,24 @@ async def market_calendar(days: int = Query(CALENDAR_DAYS_DEFAULT, ge=1, le=CALE
         raise HTTPException(status_code=503, detail=CALENDAR_UNAVAILABLE_DETAIL) from None
     return econ_calendar.window(calendar, _now(), days)
 
+
+# ── /market/weekend/log (Part 3.4c decision 11) ──────────────────
+# Whether HIGH actually predicted bad weekends, computed from rows that
+# already exist: two bounded reads, no new storage, nothing to backfill.
+
+LOG_WEEKS_DEFAULT = 26
+LOG_WEEKS_MAX = 52
+
+
+@app.get("/market/weekend/log")
+async def market_weekend_log(weeks: int = Query(LOG_WEEKS_DEFAULT, ge=1, le=LOG_WEEKS_MAX)):
+    """Each weekend-eve session's levelAtClose (the last row before the bell)
+    and levelAtSettle, against the ES=F / NQ=F move from that settle to the
+    next session's first row. `summary` grades levelAtClose."""
+    since = _now() - timedelta(weeks=weeks)
+    rows = await _read(db.weekend_rows, since)
+    first_rows = await _read(db.first_market_rows, since)
+    return weekend_log.build(rows, first_rows, weeks=weeks, since=since)
 
 # ── /market/weekend/situation (Part 3.4c decision 2) ─────────────
 # The operator's "an unresolved thing is live" flag, which the weekend block
