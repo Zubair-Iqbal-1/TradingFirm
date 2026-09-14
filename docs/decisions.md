@@ -697,3 +697,32 @@ The shared ×1.3–1.8 put 3.5's code above its band (1,119 vs ~770–1,060) and
 **Why:** 3.6a's code landed at ×1.37 overall. Commits extending an existing module came in at ×0.9–1.1, new modules at ×1.5–2.3. Tests landed at ×1.07 (×0.6–1.55). Five of eight commits were under the old bands' floors.
 
 **Supersedes:** the 2026-09-10 entry "Separate estimate bands for code and tests (from Part 3.6)" (code ×1.3–1.9, tests ×1.05–1.5).
+
+---
+
+## 2026-09-14 — Night mode (Part 3.4b)
+
+**Decision:** approved spec `docs/specs/3.4b.md` (v2). What later parts build on:
+
+- **Night slots** at :15 / :45 ET when CME equity futures trade and no XNYS session runs: 16:45 and 18:15 → 08:45 on weeknights, Sundays from 18:15, 155 a week.
+- **`CMES` models neither the daily 17:00–18:00 ET halt nor the Friday 17:00 close.** Both are cut by hand, and so are the 45 min before an XNYS open: a refusal's 900 s cooldown would otherwise still block the 09:30 download.
+- **The cap:** the worse ES=F / NQ=F move since the settle whose bars the monitors read → −1.5 % at most CAUTIOUS, −3 % at most DANGER, −5 % CRITICAL. `score = min(base, cap)`, so it never raises one. Provisional, like 3.3's numbers.
+- **Every check stores the futures prices it saw**, and the reference is the settle row's block, so the cap never depends on how yfinance dates a bar. Market checks are capped too (3.6b's open question 1, closed); the settle check is exempt.
+- **Night rows copy the settle's monitors**, carry `kind: night`, and publish through 3.4's throttle unchanged, so a night regime change reaches 3.6b's brief hook.
+- **Step 0 (2026-09-13):** the 1d bar updates live in the evening session (ES=F 7623.00 → 7619.00 over 30 min), within 0.013 % of the 1h close. It carries the ET date the session *started* and does not flip at UTC midnight, so `series.is_partial` reads False for it after 16:15 ET — a later part reading futures through `align()` must not take it for a complete bar.
+- **`^VIX` at night → Part 3.4d**, whatever R3 shows: re-scoring that monitor would touch 3.3's scoring.
+- **Deferred:** hysteresis if band-edge flapping appears; 3.4c's weekend-exposure signal reads `overlay.base` for the uncapped score.
+
+**Why:** the plan row's "every 30 min using futures + VIX" needed an unverified dating fact and new math. Each bullet is where a plausible default would mis-score a night: an hours-old price capping a regime, a bar label read as complete, a night refusal blinding the open.
+
+**Supersedes:** the 2026-09-10 entry "Part 3.4b (night mode) goes after 3.6" (now built), and 3.4's carry-forward of Part 5's 08:00 pre-market check, which becomes the 07:45 / 08:15 night slots.
+
+---
+
+## 2026-09-14 — Estimate band for new modules (from Part 3.4b)
+
+**Decision:** new-module code is estimated at **×1.5–2.3**. Entry B's ×1.1–1.6 stays for code extending an existing module, and tests stay ×0.9–1.3.
+
+**Why:** 3.6b's new modules landed at ×1.87 and ×1.97 against B's ×1.6 top. Cut this way, 3.4b's `scoring/overlay.py` landed at 118 inside 105–161.
+
+**Supersedes:** the 2026-09-11 entry "Estimate bands revised on 3.6a actuals", for new-module code only.
