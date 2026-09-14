@@ -20,6 +20,7 @@ from monitors.quotes import get_quotes_view
 from monitors.regime import MONITORS
 from scoring.overlay import futures_prices
 from scoring.regime_classifier import classify
+from scoring.weekend import vix5d
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +76,9 @@ async def compute_health(r, memory, *, now: Callable[[], datetime] = _utc_now) -
     # The futures prices this check saw, for the row and for 3.4b's cap. No
     # score depends on them here: the cap is applied by the scheduler.
     health["futures"] = futures_prices(view)
+    # 3.4c: the VIX snapshot the weekend block reads — the live (partial)
+    # level and the last complete closes behind it. No monitor scores it.
+    health["vix5d"] = vix5d(view)
     health["inputs"] = {
         "asOf": view["asOf"],
         "source": view["source"],

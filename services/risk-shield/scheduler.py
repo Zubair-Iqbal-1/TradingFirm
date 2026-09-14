@@ -29,8 +29,9 @@ import pandas as pd
 import db
 import news_poller
 import wallclock
+import weekend_inputs
 from monitors import quotes
-from scoring import overlay
+from scoring import overlay, weekend
 from scoring.alert_manager import publish_health
 from scoring.health_calculator import compute_health
 from scoring.regime_classifier import classify
@@ -259,6 +260,66 @@ def previous_close_before(day: date) -> Optional[datetime]:
     return None
 
 
+# ── The weekend window (Part 3.4c decisions 4 and 5) ─────────────
+# A weekend-eve session is the last XNYS session before a gap of ≥ 2
+# calendar days with no session: Friday in a normal week, Thursday before
+# a Friday holiday, Friday before a Monday holiday — where the exposure is
+# longer, not absent. From 30 minutes before its close, every market check
+# and that day's settle carries a weekend block.
+
+WEEKEND_GAP_DAYS = 3        # days to the next session: Fri → Mon is 3
+WEEKEND_CUTOFF = timedelta(minutes=30)
+WEEKEND_KINDS = (KIND_MARKET, KIND_SETTLE)
+
+
+def next_session_after(day: date) -> Optional[tuple[date, datetime]]:
+    """(date, open in UTC) of the first XNYS session after `day`, or None
+    (ERROR) when the calendar cannot reach one."""
+    try:
+        for offset in range(1, NEXT_SLOT_HORIZON_DAYS + 1):
+            ahead = day + timedelta(days=offset)
+            bounds = session_bounds(ahead)
+            if bounds is not None:
+                return ahead, bounds[0]
+    except CalendarOutOfBounds as e:
+        logger.error(f"No next XNYS session after {day}: {e}")
+        return None
+    logger.error(f"No XNYS session within {NEXT_SLOT_HORIZON_DAYS} days after {day}")
+    return None
+
+
+def weekend_window(day: date) -> Optional[dict]:
+    """
+    {closeAt, nextOpenAt, gapHours, cutoff} for a weekend-eve session, else
+    None. `cutoff` is close − 30 min: the first check that carries a block.
+    """
+    try:
+        bounds = session_bounds(day)
+    except CalendarOutOfBounds as e:
+        logger.error(f"No weekend window for {day}: {e}")
+        return None
+    if bounds is None:
+        return None
+    nxt = next_session_after(day)
+    if nxt is None or (nxt[0] - day).days < WEEKEND_GAP_DAYS:
+        return None
+    close, next_open = bounds[1], nxt[1]
+    return {"closeAt": close, "nextOpenAt": next_open,
+            "gapHours": round((next_open - close).total_seconds() / 3600, 2),
+            "cutoff": close - WEEKEND_CUTOFF}
+
+
+def weekend_due(kind: str, now: datetime) -> Optional[dict]:
+    """The window when this check should carry a block, else None: a market
+    or settle check, on a weekend-eve session, at or after the cut-off."""
+    _require_aware(now)
+    if kind not in WEEKEND_KINDS:
+        return None
+    window = weekend_window(now.astimezone(ET).date())
+    if window is None or now < window["cutoff"]:
+        return None
+    return window
+
 # ── One check (decision 4) ───────────────────────────────────────
 
 TREND_POINTS = 5     # provisional: ± points against the settle base
@@ -364,6 +425,10 @@ async def run_check(state, kind: str, *, clock: Callable[[], datetime] = _utc_no
 
     trend = trend_from(health["score"], settle["score"] if settle else None)
 
+    # The weekend block (3.4c). Off-window this is None and nothing else
+    # in the check changes; a raise inside it is a bug, never the check's.
+    health["weekend"] = await weekend_block(state, health, kind, checked_at)
+
     published = None
     # The first check after a host pause carries it, published or not (3.4 follow-up addition 1).
     paused = getattr(state, "pending_paused_seconds", None)
@@ -401,6 +466,53 @@ async def run_check(state, kind: str, *, clock: Callable[[], datetime] = _utc_no
         f"published {bool(published and published['published'])}"
     )
     return {"health": health, "trend": trend, "settle": settle, "published": published, "errors": errors}
+
+
+# ── The weekend block (Part 3.4c) ────────────────────────────────
+
+def _base_score_as_of(health: dict) -> Optional[str]:
+    """The ET date of the complete bars the five complete-bar monitors read
+    — spy_trend's own bar date. `vix` is live and says so separately."""
+    raw = ((health.get("monitors") or {}).get("spy_trend") or {}).get("raw") or {}
+    date_ = raw.get("date")
+    return date_ if isinstance(date_, str) else None
+
+
+async def weekend_block(state, health: dict, kind: str, now: datetime) -> Optional[dict]:
+    """
+    The `weekend` block for this check, or None off-window. Nothing here can
+    fail the check: the assembly degrades every section to a status (F1-F5),
+    a non-finite number drops the block before it can reach a publish (F12),
+    and a raise is caught and logged as the bug it would be (F8).
+    """
+    try:
+        window = weekend_due(kind, now)
+        if window is None:
+            return None
+        inputs = await weekend_inputs.assemble(
+            state, getattr(state, "inputs_http", None), now=now,
+            close_at=window["closeAt"], next_open_at=window["nextOpenAt"])
+        overlay_record = health.get("overlay") or {}
+        block = weekend.assess(
+            capped_score=health.get("score"),
+            base_score=overlay_record.get("base", health.get("score")),
+            regime=health.get("regime"),
+            vix=health.get("vix5d"),
+            window={"gapHours": window["gapHours"],
+                    "closeAt": window["closeAt"].isoformat(),
+                    "nextOpenAt": window["nextOpenAt"].isoformat(),
+                    "baseScoreAsOf": _base_score_as_of(health)},
+            assessed_at=health.get("checkedAt") or now.isoformat(),
+            **inputs)
+        block, dropped = weekend.drop_if_nonfinite(block)
+        state.weekend_dropped = dropped
+        if block is not None:
+            logger.info(f"Weekend exposure {block['level']} ({block['points']} pts): "
+                        f"{', '.join(r['code'] for r in block['reasons']) or 'no reasons'}")
+        return block
+    except Exception as e:
+        logger.error(f"Weekend block raised {type(e).__name__}: {e}")
+        return None
 
 
 # ── One night check (3.4b decision 6) ────────────────────────────
