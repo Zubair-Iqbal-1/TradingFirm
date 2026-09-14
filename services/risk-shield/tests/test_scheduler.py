@@ -73,7 +73,10 @@ class FakePool:
         best = max(matches, key=lambda r: r["checked_at"])
         return {"checked_at": best["checked_at"], "score": best["score"],
                 "regime": classify(best["score"]),
-                "indicators": json.dumps({"kind": "settle", "futures": best.get("futures") or {}})}
+                "indicators": json.dumps({"kind": "settle", "futures": best.get("futures") or {},
+                                          "coverage": best.get("coverage"),
+                                          "monitors": best.get("monitors") or {},
+                                          "stale": best.get("stale", False), "staleMonitors": []})}
 
     async def execute(self, sql, *args):
         if self.fail_insert:
@@ -576,3 +579,210 @@ def test_night_trend_base_is_latest_settle():
     # A night check reads the latest settle there is, including today's 16:20.
     for at in (et(2026, 9, 10, 20, 15), et(2026, 9, 11, 7, 15), et(2026, 9, 12, 3, 15)):
         assert scheduler.settle_cutoff(at, "night") == at
+
+
+# ── Night checks (Part 3.4b decision 6) ──────────────────────────
+
+NIGHT_AT = et(2026, 9, 10, 20, 15)
+SETTLE_MONITORS = {"vix": {"score": 60, "raw": {"level": 18.0}, "detail": "vix", "stale": False, "weight": 25}}
+SETTLE_FOR_NIGHT = {"checked_at": et(2026, 9, 10, 16, 20), "score": 63, "kind": "settle",
+                    "coverage": 100, "monitors": SETTLE_MONITORS,
+                    "futures": fut(5000.0, 20000.0, at="2026-09-10T20:20:02+00:00")}
+
+
+def night_view(es=None, nq=None, reason=None, as_of="2026-09-10T20:15:00+00:00"):
+    tickers = {t: {"date": ["2026-09-09", "2026-09-10"], "close": [price + 10.0, price],
+                   "asOf": as_of, "stale": False}
+               for t, price in (("ES=F", es), ("NQ=F", nq)) if price is not None}
+    return {"asOf": as_of if tickers else None, "source": "fresh" if tickers else "none",
+            "reason": reason, "tickers": tickers,
+            "staleTickers": [t for t in ("ES=F", "NQ=F") if t not in tickers]}
+
+
+def patch_night_view(monkeypatch, view):
+    calls = []
+
+    async def fake(r, memory, *, now):
+        calls.append(now())
+        return view
+
+    monkeypatch.setattr(scheduler.quotes, "get_night_view", fake)
+    return calls
+
+
+async def _never_computes(*args, **kwargs):
+    raise AssertionError("a night check never re-runs the monitors")
+
+
+@pytest.mark.asyncio
+async def test_night_check_order_reference_download_publish_insert(monkeypatch):
+    log = []
+    state = make_state(log, rows=[SETTLE_FOR_NIGHT])
+    monkeypatch.setattr(scheduler, "compute_health", _never_computes)
+    calls = patch_night_view(monkeypatch, night_view(es=4840.0, nq=19400.0))    # ES −3.2 %
+
+    result = await scheduler.run_check(state, "night", clock=Clock(NIGHT_AT))
+
+    assert calls == [NIGHT_AT]
+    health = result["health"]
+    assert (health["score"], health["regime"], result["trend"]) == (39, "DANGER", "declining")
+    assert health["monitors"] == SETTLE_MONITORS and health["coverage"] == 100   # copied, not recomputed
+    assert health["overlay"]["status"] == "applied" and health["futures"]["ES=F"]["price"] == 4840.0
+    assert health["inputs"]["source"] == "fresh" and health["stale"] is False
+    indicators = json.loads(state.db_pool.inserts[-1][4])
+    assert indicators["kind"] == "night" and indicators["monitors"] == SETTLE_MONITORS
+    assert indicators["settleScore"] == 63
+    assert json.loads(state.redis.published[-1][1])["kind"] == "night"
+    assert log == ["publish", "insert"]                                          # no compute
+
+
+@pytest.mark.asyncio
+async def test_night_check_without_db_skips_download(monkeypatch, caplog):
+    calls = patch_night_view(monkeypatch, night_view(es=4840.0, nq=19400.0))
+    with caplog.at_level(logging.WARNING):
+        assert await scheduler.run_check(make_state([], pool=None), "night", clock=Clock(NIGHT_AT)) is None
+    assert calls == []
+    assert any("database unavailable" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [asyncpg.PostgresConnectionError("down"), TimeoutError()],
+                         ids=["db_error", "timeout"])
+async def test_night_check_reference_read_failure_skips_download(monkeypatch, caplog, failure):
+    state = make_state([], rows=[SETTLE_FOR_NIGHT], fail_read=failure)
+    calls = patch_night_view(monkeypatch, night_view(es=4840.0, nq=19400.0))
+    with caplog.at_level(logging.WARNING):
+        assert await scheduler.run_check(state, "night", clock=Clock(NIGHT_AT)) is None
+    assert calls == [] and state.db_pool.inserts == []
+
+
+@pytest.mark.asyncio
+async def test_night_check_without_settle_skips(monkeypatch, caplog):
+    state = make_state([], rows=[])
+    calls = patch_night_view(monkeypatch, night_view(es=4840.0, nq=19400.0))
+    with caplog.at_level(logging.WARNING):
+        assert await scheduler.run_check(state, "night", clock=Clock(NIGHT_AT)) is None
+    assert calls == [] and state.db_pool.inserts == []
+    assert any("no scored settle" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_night_check_pre_3_4b_settle_no_download(monkeypatch):
+    """A settle written before 3.4b carries no futures: a row, but no request."""
+    state = make_state([], rows=[{k: v for k, v in SETTLE_FOR_NIGHT.items() if k != "futures"}])
+    calls = patch_night_view(monkeypatch, night_view(es=4000.0, nq=16000.0))
+    result = await scheduler.run_check(state, "night", clock=Clock(NIGHT_AT))
+
+    assert calls == []
+    health = result["health"]
+    assert (health["score"], health["overlay"]["status"], health["stale"]) == (63, "no_reference", True)
+    assert health["inputs"] == {"asOf": None, "source": "none", "reason": "no_reference",
+                                "staleTickers": ["ES=F", "NQ=F"]}
+    assert json.loads(state.db_pool.inserts[-1][4])["kind"] == "night"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reason", ["cooldown", "rate_limited", "error", "empty"])
+async def test_night_check_download_failure_records_stale_row(monkeypatch, reason):
+    state = make_state([], rows=[SETTLE_FOR_NIGHT])
+    patch_night_view(monkeypatch, night_view(reason=reason))          # no prices came back
+    result = await scheduler.run_check(state, "night", clock=Clock(NIGHT_AT))
+
+    health = result["health"]
+    assert (health["score"], health["overlay"]["status"], health["stale"]) == (63, "unavailable", True)
+    assert health["inputs"]["reason"] == reason
+    assert json.loads(state.db_pool.inserts[-1][4])["stale"] is True
+
+
+@pytest.mark.asyncio
+async def test_night_check_missed_settle_is_stale(monkeypatch):
+    """The reference is not the latest session's settle: capped against it, flagged."""
+    older = dict(SETTLE_FOR_NIGHT, checked_at=et(2026, 9, 9, 16, 20))
+    state = make_state([], rows=[older])
+    patch_night_view(monkeypatch, night_view(es=4990.0, nq=19960.0))   # −0.2 %, no cap
+    result = await scheduler.run_check(state, "night", clock=Clock(NIGHT_AT))
+    assert result["health"]["score"] == 63 and result["health"]["stale"] is True
+    assert result["health"]["overlay"]["status"] == "within"
+
+
+@pytest.mark.asyncio
+async def test_night_check_publishes_through_throttle(monkeypatch):
+    state = make_state([], rows=[SETTLE_FOR_NIGHT])
+    patch_night_view(monkeypatch, night_view(es=4990.0, nq=19960.0))
+    first = await scheduler.run_check(state, "night", clock=Clock(NIGHT_AT))
+    assert first["published"]["reason"] == "initial" and first["health"]["score"] == 63
+
+    # A crash 5 minutes later caps to CRITICAL, which bypasses the 15-minute interval.
+    patch_night_view(monkeypatch, night_view(es=4700.0, nq=18800.0))
+    second = await scheduler.run_check(state, "night", clock=Clock(NIGHT_AT + timedelta(minutes=5)))
+    assert (second["health"]["score"], second["health"]["regime"]) == (19, "CRITICAL")
+    assert second["published"]["reason"] == "critical"
+
+
+@pytest.mark.asyncio
+async def test_night_check_publish_calls_brief_hook(monkeypatch):
+    requests = []
+    monkeypatch.setattr(scheduler, "on_check_published", lambda state, reason: requests.append(reason))
+    state = make_state([], rows=[SETTLE_FOR_NIGHT])
+    patch_night_view(monkeypatch, night_view(es=4840.0, nq=19400.0))
+    await scheduler.run_check(state, "night", clock=Clock(NIGHT_AT))
+    assert requests == ["initial"]                    # 3.6b keeps only regime_change / critical
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [asyncpg.PostgresConnectionError("down"), TimeoutError()],
+                         ids=["db_error", "timeout"])
+async def test_night_check_insert_failure_logged(monkeypatch, caplog, failure):
+    state = make_state([], rows=[SETTLE_FOR_NIGHT], fail_insert=failure)
+    patch_night_view(monkeypatch, night_view(es=4840.0, nq=19400.0))
+    with caplog.at_level(logging.WARNING):
+        result = await scheduler.run_check(state, "night", clock=Clock(NIGHT_AT))
+    assert result["published"]["published"] is True            # the publish already happened
+    assert result["errors"] == [f"insert: {type(failure).__name__}"]
+
+
+@pytest.mark.asyncio
+async def test_night_check_skips_when_quotes_lock_held(monkeypatch, caplog):
+    monkeypatch.setattr(scheduler.quotes, "download_in_flight", lambda: True)
+    state = make_state([], rows=[SETTLE_FOR_NIGHT])
+    calls = patch_night_view(monkeypatch, night_view(es=4840.0, nq=19400.0))
+    with caplog.at_level(logging.WARNING):
+        assert await scheduler.run_check(state, "night", clock=Clock(NIGHT_AT)) is None
+    assert calls == [] and state.db_pool.reads == []
+
+
+@pytest.mark.asyncio
+async def test_loop_runs_night_slot_once_and_dispatches_kind(monkeypatch):
+    # run_check hands a night slot to run_night_check.
+    marker = []
+
+    async def fake_night(state, *, clock):
+        marker.append(clock())
+        return None
+
+    monkeypatch.setattr(scheduler, "run_night_check", fake_night)
+    assert await scheduler.run_check(make_state([]), "night", clock=Clock(NIGHT_AT)) is None
+    assert marker == [NIGHT_AT]
+
+    # The loop runs each night slot once, 30 minutes apart.
+    clock = Clock(NIGHT_AT)
+    runs = patch_run_check(monkeypatch)
+    sleep, _ = loop_sleep(clock, stop_at=et(2026, 9, 10, 20, 50))
+    with pytest.raises(asyncio.CancelledError):
+        await scheduler.run_scheduler(make_state([]), clock=clock, sleep=sleep)
+    assert runs == [("night", NIGHT_AT), ("night", et(2026, 9, 10, 20, 45))]
+
+
+@pytest.mark.asyncio
+async def test_loop_night_slots_missed_after_sleep(monkeypatch, caplog):
+    # The settle runs, the Mac sleeps through the evening, and the loop wakes at 07:44.
+    clock = Clock(et(2026, 9, 10, 16, 20))
+    runs = recording_check(monkeypatch)
+    sleep, _ = loop_sleep(clock, stop_at=et(2026, 9, 11, 7, 50),
+                          freeze=(et(2026, 9, 10, 16, 21), et(2026, 9, 11, 7, 44)))
+    with caplog.at_level(logging.WARNING), pytest.raises(asyncio.CancelledError):
+        await scheduler.run_scheduler(make_state([]), clock=clock, sleep=sleep)
+    assert [(kind, at) for kind, at, _ in runs] == [
+        ("settle", et(2026, 9, 10, 16, 20)), ("night", et(2026, 9, 11, 7, 45))]
+    assert any("Missed 28 health check slot(s) up to 2026-09-11T11:15:00+00:00" in r.getMessage()
+               for r in caplog.records)

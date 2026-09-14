@@ -258,15 +258,22 @@ async def test_settle_reference_query():
     pool = _RecordingPool(row={"checked_at": PREV, "score": 70, "regime": "HEALTHY",
                                "indicators": json.dumps({"kind": "settle", "futures": futures})})
     assert await db.settle_reference(pool, before) == {
-        "score": 70, "checkedAt": PREV, "regime": "HEALTHY", "futures": futures}
+        "score": 70, "checkedAt": PREV, "regime": "HEALTHY", "futures": futures,
+        "indicators": {"kind": "settle", "futures": futures}}
     [(op, sql, args)] = pool.calls
     assert op == "fetchrow" and args == (before,)
     assert _flat(sql) == ("SELECT checked_at, score, regime, indicators FROM risk.health_checks "
                           "WHERE indicators->>'kind' = 'settle' AND score IS NOT NULL AND checked_at < $1 "
                           "ORDER BY checked_at DESC LIMIT 1")
-    # A row from before 3.4b, a corrupt blob, a wrong-shaped one: no reference, never a raise.
-    for stored in (json.dumps({"kind": "settle"}), "not json {", json.dumps([1, 2]), None):
+    # A row from before 3.4b keeps its blob; it simply has no futures block.
+    pool = _RecordingPool(row={"checked_at": PREV, "score": 70, "regime": "HEALTHY",
+                               "indicators": json.dumps({"kind": "settle", "coverage": 100})})
+    reference = await db.settle_reference(pool, before)
+    assert reference["futures"] == {} and reference["indicators"] == {"kind": "settle", "coverage": 100}
+    # A corrupt or wrong-shaped blob: nothing to copy, and never a raise.
+    for stored in ("not json {", json.dumps([1, 2]), None):
         pool = _RecordingPool(row={"checked_at": PREV, "score": 70, "regime": "HEALTHY",
                                    "indicators": stored})
-        assert (await db.settle_reference(pool, before))["futures"] == {}
+        reference = await db.settle_reference(pool, before)
+        assert reference["futures"] == {} and reference["indicators"] == {}
     assert await db.settle_reference(_RecordingPool(row=None), before) is None

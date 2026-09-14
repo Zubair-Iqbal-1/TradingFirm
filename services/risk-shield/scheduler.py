@@ -311,6 +311,20 @@ def _failure(step: str, e: Exception, errors: list[str]) -> None:
         logger.error(f"Health check {step} raised {type(e).__name__}: {e}")
 
 
+def latest_settle_time(now: datetime) -> Optional[datetime]:
+    """The 16:20 ET settle of the most recent XNYS session at or before `now`:
+    the row a night check expects its reference to be (3.4b decision 6)."""
+    day = now.astimezone(ET).date()
+    try:
+        for offset in range(NEXT_SLOT_HORIZON_DAYS):
+            behind = day - timedelta(days=offset)
+            if session_bounds(behind) is not None and settle_time(behind) <= now:
+                return settle_time(behind)
+    except CalendarOutOfBounds as e:
+        logger.error(f"No settle time before {now.isoformat()}: {e}")
+    return None
+
+
 async def run_check(state, kind: str, *, clock: Callable[[], datetime] = _utc_now) -> Optional[dict]:
     """
     One health check on `state` (redis, db_pool, cooldowns, check_status):
@@ -319,6 +333,8 @@ async def run_check(state, kind: str, *, clock: Callable[[], datetime] = _utc_no
     bug ERROR, and the next step still runs; compute itself never raises for
     a source state (3.3), so a raise there is a bug for the loop to log.
     """
+    if kind == KIND_NIGHT:
+        return await run_night_check(state, clock=clock)
     if quotes.download_in_flight():
         logger.warning(f"Health check ({kind}) skipped: a core quotes download holds the lock")
         return None
@@ -382,6 +398,95 @@ async def run_check(state, kind: str, *, clock: Callable[[], datetime] = _utc_no
     )
     logger.info(
         f"Health check ({kind}): {health['regime']} {health['score']}, trend {trend}, "
+        f"published {bool(published and published['published'])}"
+    )
+    return {"health": health, "trend": trend, "settle": settle, "published": published, "errors": errors}
+
+
+# ── One night check (3.4b decision 6) ────────────────────────────
+
+async def run_night_check(state, *, clock: Callable[[], datetime] = _utc_now) -> Optional[dict]:
+    """
+    One night check: the latest settle's score, capped by how far the futures
+    have moved since that settle. It never re-runs the monitors — they read
+    complete bars, which have not changed — and it never spends a request it
+    cannot use: no pool, no scored settle, or a settle with no stored futures
+    means no download at all. Publish and insert follow 3.4's rules unchanged.
+    """
+    if quotes.download_in_flight():
+        logger.warning("Night check skipped: a core quotes download holds the lock")
+        return None
+    pool = getattr(state, "db_pool", None)
+    if pool is None:
+        logger.warning("Night check skipped: database unavailable, nothing to store it in")
+        return None
+
+    now = clock()
+    try:
+        settle = await db.settle_reference(pool, settle_cutoff(now, KIND_NIGHT))
+    except Exception as e:
+        logger.warning(f"Night check skipped: the settle read failed ({type(e).__name__})")
+        return None
+    if settle is None:
+        logger.warning("Night check skipped: no scored settle to overlay")
+        return None
+
+    r = getattr(state, "redis", None)
+    errors: list[str] = []
+    reference = settle["futures"]
+    view = {"asOf": None, "source": "none", "reason": "no_reference",
+            "tickers": {}, "staleTickers": list(quotes.NIGHT_TICKERS)}
+    if any(reference.values()):          # nothing to compare against → no request (G6)
+        view = await quotes.get_night_view(r, state.cooldowns, now=lambda: now)
+
+    score, record = overlay.apply_overlay(settle["score"], reference, overlay.futures_prices(view))
+    expected = latest_settle_time(now)
+    missed_settle = expected is not None and settle["checkedAt"] < expected
+    indicators = settle["indicators"]
+    health = {
+        "score": score,
+        "regime": classify(score),
+        "coverage": indicators.get("coverage"),
+        # The score is the settle's, so it is stale whenever the cap could not
+        # be measured or the settle it copies is not the latest session's.
+        "stale": bool(indicators.get("stale")) or missed_settle
+        or record["status"] in (overlay.STATUS_NO_REFERENCE, overlay.STATUS_UNAVAILABLE),
+        "staleMonitors": indicators.get("staleMonitors") or [],
+        "monitors": indicators.get("monitors") or {},
+        "checkedAt": now.isoformat(),
+        "inputs": {key: view[key] for key in ("asOf", "source", "reason", "staleTickers")},
+        "futures": overlay.futures_prices(view),
+        "overlay": record,
+    }
+    trend = trend_from(score, settle["score"])
+
+    paused = getattr(state, "pending_paused_seconds", None)
+    state.pending_paused_seconds = None
+    published = None
+    try:
+        published = await publish_health(r, health, trend, now=now,
+                                         news=news_poller.stale_view(state, now),
+                                         paused_seconds=paused, kind=KIND_NIGHT)
+    except Exception as e:
+        _failure("publish", e, errors)
+
+    hook = on_check_published
+    if hook is not None and published and published["published"]:
+        try:
+            hook(state, published["reason"])
+        except Exception as e:
+            _failure("publish hook", e, errors)
+
+    try:
+        await db.insert_health_check(pool, health, KIND_NIGHT, trend, settle, paused_seconds=paused)
+    except Exception as e:
+        _failure("insert", e, errors)
+
+    state.check_status.update(lastCheckAt=health["checkedAt"], lastKind=KIND_NIGHT,
+                              lastScore=score, lastError="; ".join(errors) or None)
+    logger.info(
+        f"Night check: {health['regime']} {score} (settle {settle['score']}, "
+        f"{record['status']} {record['movePct'] if record['movePct'] is None else round(record['movePct'], 2)}%), "
         f"published {bool(published and published['published'])}"
     )
     return {"health": health, "trend": trend, "settle": settle, "published": published, "errors": errors}

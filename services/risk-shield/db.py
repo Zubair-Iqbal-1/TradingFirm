@@ -173,9 +173,10 @@ async def settle_base(pool, before: datetime) -> Optional[dict]:
 
 
 async def settle_reference(pool, before: datetime) -> Optional[dict]:
-    """{score, checkedAt, regime, futures} of the latest scored settle before
-    `before`, or None. `futures` is that settle's stored block, {} when the row
-    predates 3.4b or its JSONB has the wrong shape."""
+    """{score, checkedAt, regime, futures, indicators} of the latest scored
+    settle before `before`, or None. `futures` is that settle's stored block and
+    `indicators` its whole JSONB (the night check copies the monitors from it);
+    both are {} when the row predates 3.4b or the blob has the wrong shape."""
     row = await pool.fetchrow(SETTLE_REFERENCE_SQL, before)
     if row is None:
         return None
@@ -186,7 +187,8 @@ async def settle_reference(pool, before: datetime) -> Optional[dict]:
     futures = indicators.get("futures") if isinstance(indicators, dict) else None
     return {"score": row["score"], "checkedAt": row["checked_at"],
             "regime": row["regime"] if "regime" in row else None,
-            "futures": futures if isinstance(futures, dict) else {}}
+            "futures": futures if isinstance(futures, dict) else {},
+            "indicators": indicators if isinstance(indicators, dict) else {}}
 
 
 def _json_bool(text: Any) -> Optional[bool]:
