@@ -73,9 +73,9 @@ class HealthPool:
     (et(2026, 9, 10, 16, 21), ("settle", et(2026, 9, 10, 16, 20))),   # just after settle
     (et(2026, 9, 10, 16, 26), ("settle", et(2026, 9, 10, 16, 20))),
     (et(2026, 9, 10, 16, 10), ("market", et(2026, 9, 10, 16, 0))),    # between close and settle
-    (et(2026, 9, 11, 7, 25), ("settle", et(2026, 9, 10, 16, 20))),    # pre-market: yesterday's settle
-    (et(2026, 9, 12, 10, 0), ("settle", et(2026, 9, 11, 16, 20))),    # Saturday
-    (et(2026, 11, 26, 10, 0), ("settle", et(2026, 11, 25, 16, 20))),  # Thanksgiving (XNYS holiday)
+    (et(2026, 9, 11, 7, 25), ("night", et(2026, 9, 11, 7, 15))),      # pre-market: that morning's night slot
+    (et(2026, 9, 12, 10, 0), ("night", et(2026, 9, 11, 16, 45))),     # Saturday: Friday's last night slot
+    (et(2026, 11, 26, 10, 0), ("night", et(2026, 11, 26, 9, 45))),    # Thanksgiving: CME trades, XNYS does not
     (et(2026, 11, 27, 13, 10), ("market", et(2026, 11, 27, 13, 0))),  # early close, close slot inclusive
     (et(2026, 11, 27, 15, 0), ("market", et(2026, 11, 27, 13, 0))),
     (et(2026, 11, 27, 16, 25), ("settle", et(2026, 11, 27, 16, 20))),
@@ -114,21 +114,22 @@ async def test_inputs_health_from_latest_row():
 @pytest.mark.parametrize("now, row_at, kind, stale", [
     (et(2026, 9, 10, 14, 7), et(2026, 9, 10, 14, 5, 2), "market", False),   # in session, on time
     (et(2026, 9, 10, 14, 12), et(2026, 9, 10, 14, 0, 2), "market", True),   # one slot late
-    (et(2026, 9, 11, 7, 30), et(2026, 9, 10, 16, 20, 2), "settle", False),  # 07:30 with yesterday's settle
-    (et(2026, 9, 11, 7, 30), et(2026, 9, 10, 16, 0, 2), "market", True),    # 07:30, the settle is missing
-    (et(2026, 9, 12, 10, 0), et(2026, 9, 11, 16, 20, 3), "settle", False),  # Saturday
-], ids=["on-time", "one-slot-late", "0730-with-settle", "0730-without-settle", "saturday"])
+    (et(2026, 9, 11, 7, 30), et(2026, 9, 11, 7, 15, 2), "night", False),    # 07:30 with the 07:15 night row
+    (et(2026, 9, 11, 7, 30), et(2026, 9, 10, 16, 20, 2), "settle", True),   # 07:30, the night rows are missing
+    (et(2026, 9, 12, 10, 0), et(2026, 9, 11, 16, 45, 3), "night", False),   # Saturday: Friday's last night row
+], ids=["on-time", "one-slot-late", "0730-with-night", "0730-without-night", "saturday"])
 async def test_inputs_health_stale_against_last_expected_slot(now, row_at, kind, stale):
     health, _ = await macro_inputs.health_section(HealthPool(latest=_row(row_at, kind=kind)), now)
     fresh = macro_inputs.health_freshness(health)
     assert fresh["healthStale"] is stale
     assert health["kind"] == kind
-    if now == et(2026, 9, 11, 7, 30) and not stale:
-        # Amendment B: the fresh 07:30 verdict never hides the age. Whoever
-        # "fixes" the verdict must see that ~670 minutes is still exposed.
+    if now == et(2026, 9, 12, 10, 0):
+        # Amendment B: a fresh verdict never hides the age. With night rows the
+        # 07:30 brief is 15 minutes behind, so the weekend carries the old case:
+        # fresh against Friday's last night slot, and still ~17 hours old.
         assert fresh["healthAgeMinutes"] > 600
-        assert fresh["healthAgeMinutes"] == health["ageMinutes"] == 909
-        assert health["lastExpectedSlotAt"] == et(2026, 9, 10, 16, 20).isoformat()
+        assert fresh["healthAgeMinutes"] == health["ageMinutes"] == 1034
+        assert health["lastExpectedSlotAt"] == et(2026, 9, 11, 16, 45).isoformat()
 
 
 @pytest.mark.asyncio

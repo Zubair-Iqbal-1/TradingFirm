@@ -37,33 +37,57 @@ logger = logging.getLogger(__name__)
 
 ET = ZoneInfo("America/New_York")
 CALENDAR_NAME = "XNYS"
+FUTURES_CALENDAR_NAME = "CMES"  # CME Globex equity futures (spec 3.4b decision 10)
 SLOT_MINUTES = 5
 SETTLE_TIME_ET = time(16, 20)   # provisional (spec 3.4 decision 3)
 GRACE_SECONDS = 60              # provisional: a slot runs only this late
 KIND_MARKET = "market"
 KIND_SETTLE = "settle"
+KIND_NIGHT = "night"
+
+# Night slots (spec 3.4b decision 2): :15 and :45 ET while CME equity futures
+# trade and no XNYS session is under way.
+NIGHT_MINUTES = (15, 45)
+HALT_START_ET = time(17, 0)     # CMES models neither the daily 17:00-18:00 ET
+HALT_END_ET = time(18, 0)       # halt nor the Friday 17:00 close: cut by hand
+# 08:45 is the last morning slot, so a refusal's 900 s yfinance cooldown clears
+# before the open and the 09:30 check still downloads (3.4b decision 7).
+PRE_OPEN_QUIET = timedelta(minutes=45)
 
 # The calendar is built around the date asked about, so one build covers
 # every date the scheduler looks at for about a year.
 CALENDAR_DAYS_BEFORE = 30
 CALENDAR_DAYS_AFTER = 400
 NEXT_SLOT_HORIZON_DAYS = 15     # the longest gap between sessions is 4 days
+SLOTS_CACHE_MAX = 60            # dates kept in the slot cache (G8); the loop looks 15 days out
 
 
 class CalendarOutOfBounds(RuntimeError):
-    """The XNYS calendar cannot cover the date even after a rebuild."""
+    """A calendar cannot cover the date even after a rebuild."""
 
 
-# One calendar per process, built lazily (decision 2). Pure data, no network.
+# One calendar of each kind per process, built lazily (3.4 decision 2, 3.4b
+# decision 10). Pure data, no network. _slots_cache holds one day's slots, since
+# night slots ask the futures calendar 48 times a day; a rebuild clears it.
 _calendar_state: dict[str, Any] = {"cal": None}
+_futures_calendar_state: dict[str, Any] = {"cal": None}
+_slots_cache: dict[date, list] = {}
 
 
-def _build_calendar(day: date):
+def _build(name: str, day: date):
     return xcals.get_calendar(
-        CALENDAR_NAME,
+        name,
         start=day - timedelta(days=CALENDAR_DAYS_BEFORE),
         end=day + timedelta(days=CALENDAR_DAYS_AFTER),
     )
+
+
+def _build_calendar(day: date):
+    return _build(CALENDAR_NAME, day)
+
+
+def _build_futures_calendar(day: date):
+    return _build(FUTURES_CALENDAR_NAME, day)
 
 
 def _covers(cal, day: date) -> bool:
@@ -71,19 +95,32 @@ def _covers(cal, day: date) -> bool:
     return cal.first_session <= ts <= cal.last_session
 
 
-def market_calendar(day: date):
-    """The cached XNYS calendar if it covers `day`; otherwise one rebuild
-    around `day`. Still not covering it raises CalendarOutOfBounds."""
-    cal = _calendar_state["cal"]
+def _cached_calendar(state: dict, build, name: str, day: date):
+    """The cached calendar if it covers `day`; otherwise one rebuild around
+    `day`. Still not covering it raises CalendarOutOfBounds."""
+    cal = state["cal"]
     if cal is not None and _covers(cal, day):
         return cal
     if cal is not None:
-        logger.warning(f"XNYS calendar does not cover {day}, rebuilding")
-    cal = _build_calendar(day)
-    _calendar_state["cal"] = cal
+        logger.warning(f"{name} calendar does not cover {day}, rebuilding")
+    cal = build(day)
+    state["cal"] = cal
+    _slots_cache.clear()
     if not _covers(cal, day):
-        raise CalendarOutOfBounds(f"XNYS calendar cannot cover {day}")
+        raise CalendarOutOfBounds(f"{name} calendar cannot cover {day}")
     return cal
+
+
+def market_calendar(day: date):
+    """The XNYS calendar covering `day` (3.4 decision 2)."""
+    return _cached_calendar(_calendar_state, _build_calendar, CALENDAR_NAME, day)
+
+
+def futures_calendar(day: date):
+    """The CMES calendar covering `day` (3.4b decision 10). It models neither
+    the daily halt nor the Friday close, which night_slots_for_day cuts."""
+    return _cached_calendar(_futures_calendar_state, _build_futures_calendar,
+                            FUTURES_CALENDAR_NAME, day)
 
 
 def _require_aware(now: Any) -> None:
@@ -100,20 +137,55 @@ def session_bounds(day: date) -> Optional[tuple[datetime, datetime]]:
     return cal.session_open(ts).to_pydatetime(), cal.session_close(ts).to_pydatetime()
 
 
-def slots_for_day(day: date) -> list[tuple[str, datetime]]:
-    """Every slot of an ET date, in order: the market slots, then settle."""
+def settle_time(day: date) -> datetime:
+    """16:20 ET of an ET date, in UTC."""
+    return datetime.combine(day, SETTLE_TIME_ET, tzinfo=ET).astimezone(timezone.utc)
+
+
+def night_slots_for_day(day: date) -> list[datetime]:
+    """The :15 / :45 ET minutes of an ET date when CME equity futures trade and
+    no XNYS session is under way (3.4b decision 2). Cut: the 17:00-18:00 ET
+    halt, everything from 45 min before an XNYS open through its 16:20 settle.
+    A date with no XNYS session has no open to stand clear of."""
+    cal = futures_calendar(day)
     bounds = session_bounds(day)
-    if bounds is None:
-        return []
-    open_, close = bounds
-    step = timedelta(minutes=SLOT_MINUTES)
+    quiet = (bounds[0] - PRE_OPEN_QUIET, settle_time(day)) if bounds is not None else None
     slots = []
-    t = open_
-    while t <= close:
-        slots.append((KIND_MARKET, t))
-        t += step
-    settle = datetime.combine(day, SETTLE_TIME_ET, tzinfo=ET).astimezone(timezone.utc)
-    slots.append((KIND_SETTLE, settle))
+    for hour in range(24):
+        for minute in NIGHT_MINUTES:
+            et_time = time(hour, minute)
+            if HALT_START_ET <= et_time < HALT_END_ET:
+                continue
+            start = datetime.combine(day, et_time, tzinfo=ET).astimezone(timezone.utc)
+            if quiet is not None and quiet[0] < start <= quiet[1]:
+                continue
+            if cal.is_open_on_minute(pd.Timestamp(start)):
+                slots.append(start)
+    return slots
+
+
+def slots_for_day(day: date) -> list[tuple[str, datetime]]:
+    """Every slot of an ET date in time order: night slots, the market slots,
+    settle (3.4b decision 2). Cached per ET date, bounded at SLOTS_CACHE_MAX."""
+    market_calendar(day)      # both calendars are validated before the cache is read, so a
+    futures_calendar(day)     # rebuilt or out-of-range calendar is never served from it
+    cached = _slots_cache.get(day)
+    if cached is not None:
+        return cached
+    slots: list[tuple[str, datetime]] = [(KIND_NIGHT, t) for t in night_slots_for_day(day)]
+    bounds = session_bounds(day)
+    if bounds is not None:
+        open_, close = bounds
+        step = timedelta(minutes=SLOT_MINUTES)
+        t = open_
+        while t <= close:
+            slots.append((KIND_MARKET, t))
+            t += step
+        slots.append((KIND_SETTLE, settle_time(day)))
+    slots.sort(key=lambda slot: slot[1])
+    if len(_slots_cache) >= SLOTS_CACHE_MAX:
+        _slots_cache.clear()
+    _slots_cache[day] = slots
     return slots
 
 

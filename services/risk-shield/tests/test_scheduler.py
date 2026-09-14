@@ -415,17 +415,19 @@ async def test_loop_mac_sleep_16h_warns_on_wake_and_resumes(monkeypatch, caplog)
 @pytest.mark.asyncio
 async def test_loop_wake_between_slots_warns_missed(monkeypatch, caplog):
     # Last check Fri 09:35; the chunk starting 09:36 ET takes 16 h, waking Sat 01:36 ET.
+    # Part 3.4b: the slot it woke past is Friday's 16:45 night slot, not the settle,
+    # and the next one is Sunday 18:15 — so the window stops before the weekend runs.
     clock = Clock(et(2026, 9, 11, 9, 35))
     runs = recording_check(monkeypatch)
-    sleep, sleeps = loop_sleep(clock, stop_at=et(2026, 9, 14, 9, 35),
+    sleep, sleeps = loop_sleep(clock, stop_at=et(2026, 9, 12, 1, 40),
                                freeze=(et(2026, 9, 11, 9, 36), et(2026, 9, 12, 1, 36)))
     with caplog.at_level(logging.WARNING), pytest.raises(asyncio.CancelledError):
         await scheduler.run_scheduler(make_state([]), clock=clock, sleep=sleep)
-    assert runs == [("market", et(2026, 9, 11, 9, 35), None), ("market", et(2026, 9, 14, 9, 30), 57600)]
+    assert runs == [("market", et(2026, 9, 11, 9, 35), None)]
     assert max(sleeps) == 60
-    assert [r.getMessage() for r in caplog.records] == [                 # 09:40 … 16:00 = 77, + settle
+    assert [r.getMessage() for r in caplog.records] == [       # 09:40 … 16:00 = 77, settle, 16:45 night
         "host paused ~16h 0m (wall +57600 s, process +0 s)",
-        "Missed 78 health check slot(s) up to 2026-09-11T20:20:00+00:00 (woke 33360s after that slot)",
+        "Missed 79 health check slot(s) up to 2026-09-11T20:45:00+00:00 (woke 31860s after that slot)",
     ]
 
     # A fresh loop booted at that moment has handled nothing: it reports nothing.
