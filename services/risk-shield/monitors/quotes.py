@@ -41,12 +41,14 @@ import yfinance as yf
 from yfinance.exceptions import YFRateLimitError
 
 from cache import (
+    KIND_NIGHT_QUOTES,
     KIND_QUOTES,
     KIND_QUOTES_LAST,
     SOURCE_YFINANCE,
     TTL_COOLDOWN_YFINANCE,
     TTL_DEGRADED,
     TTL_LAST_KNOWN,
+    TTL_NIGHT_QUOTES,
     TTL_QUOTES,
     cached_json,
     canonical,
@@ -67,6 +69,12 @@ CORE_TICKERS = tuple(canonical(t) for t in (
     "SPY", "QQQ", "RSP", "^VIX", "TLT", "GLD", "UUP", "XLK", "XLU",
     "XLP", "XLV", "XLY", "XLF", "ES=F", "NQ=F", "CL=F", "GC=F",
 ))
+# Night mode (Part 3.4b decision 7). Step 0 (2026-09-13) showed the 1d bar
+# updating live through the Globex evening session, within 0.013 % of the 1h
+# close, so a night check reads the same interval the core download does.
+NIGHT_TICKERS = tuple(canonical(t) for t in ("ES=F", "NQ=F"))
+NIGHT_PERIOD = "5d"
+NIGHT_INTERVAL = "1d"
 QUOTES_PERIOD = "1y"
 QUOTES_INTERVAL = "1d"
 YF_REQUEST_TIMEOUT = 5
@@ -120,12 +128,13 @@ def is_rate_limited(messages: list[str]) -> bool:
     return any(RATE_LIMIT_PATTERN.search(m) for m in messages)
 
 
-def _download_sync(tickers: list[str]) -> pd.DataFrame:
+def _download_sync(tickers: list[str], period: str = QUOTES_PERIOD,
+                   interval: str = QUOTES_INTERVAL) -> pd.DataFrame:
     # No session= (yfinance 1.x manages its own); threads=False (CLAUDE.md).
     return yf.download(
         " ".join(tickers),
-        period=QUOTES_PERIOD,
-        interval=QUOTES_INTERVAL,
+        period=period,
+        interval=interval,
         group_by="ticker",
         threads=False,
         progress=False,
@@ -134,7 +143,8 @@ def _download_sync(tickers: list[str]) -> pd.DataFrame:
     )
 
 
-async def download_frame(tickers) -> tuple[Optional[pd.DataFrame], list[str]]:
+async def download_frame(tickers, period: str = QUOTES_PERIOD,
+                         interval: str = QUOTES_INTERVAL) -> tuple[Optional[pd.DataFrame], list[str]]:
     """
     Run the download in a thread with the yfinance logger watched.
     Returns (frame or None, captured log messages). A raised
@@ -146,7 +156,7 @@ async def download_frame(tickers) -> tuple[Optional[pd.DataFrame], list[str]]:
     yf_logger = logging.getLogger("yfinance")
     yf_logger.addHandler(capture)
     try:
-        df = await asyncio.to_thread(_download_sync, list(tickers))
+        df = await asyncio.to_thread(_download_sync, list(tickers), period, interval)
     except YFRateLimitError as e:
         return None, capture.messages + [repr(e)]
     except Exception as e:
@@ -223,15 +233,35 @@ def quotes_ttl(body: dict) -> int:
     return TTL_DEGRADED if body.get("reason") is not None else TTL_QUOTES
 
 
-def valid_quotes(body: Any) -> bool:
+def _valid_envelope(body: Any, tickers) -> bool:
     return (
         isinstance(body, dict)
         and all(k in body for k in _ENVELOPE_KEYS)
         and body["reason"] in QUOTES_REASONS
         and isinstance(body["tickers"], dict)
         and isinstance(body["missing"], list)
-        and set(body["tickers"]) | set(body["missing"]) == set(CORE_TICKERS)
+        and set(body["tickers"]) | set(body["missing"]) == set(tickers)
     )
+
+
+def valid_quotes(body: Any) -> bool:
+    return _valid_envelope(body, CORE_TICKERS)
+
+
+def valid_night_quotes(body: Any) -> bool:
+    return _valid_envelope(body, NIGHT_TICKERS)
+
+
+def night_quotes_ttl(body: dict) -> int:
+    return TTL_DEGRADED if body.get("reason") is not None else TTL_NIGHT_QUOTES
+
+
+def _require_version() -> None:
+    if yf.__version__ != EXPECTED_YF_VERSION:
+        raise QuotesError(
+            f"yfinance {yf.__version__} installed, rate-limit detection is "
+            f"written for {EXPECTED_YF_VERSION}"
+        )
 
 
 # ── Public ───────────────────────────────────────────────────────
@@ -248,11 +278,7 @@ async def get_core_quotes(r, memory, *, now: Callable[[], datetime] = _utc_now) 
     120 s and also starts the cooldown (1.x's silent-block pattern).
     """
     async def fetch() -> dict:
-        if yf.__version__ != EXPECTED_YF_VERSION:
-            raise QuotesError(
-                f"yfinance {yf.__version__} installed, rate-limit detection is "
-                f"written for {EXPECTED_YF_VERSION}"
-            )
+        _require_version()
         left = await cooldown_remaining(r, memory, SOURCE_YFINANCE, TTL_COOLDOWN_YFINANCE)
         if left is not None:
             raise QuotesCoolingDown(left)
@@ -397,3 +423,71 @@ async def get_quotes_view(r, memory, *, now: Callable[[], datetime] = _utc_now) 
         "tickers": {},
         "staleTickers": list(CORE_TICKERS),
     }
+
+
+# ── Night mode (Part 3.4b decision 7) ────────────────────────────
+
+async def get_night_quotes(r, memory, *, now: Callable[[], datetime] = _utc_now) -> tuple[dict, bool]:
+    """
+    ES=F and NQ=F as (envelope, from_cache), cached 600 s (120 s degraded).
+    Same version guard, source cooldown and single-flight lock as the core
+    download. No last-known copy: an hours-old futures price would be a wrong
+    cap, not a stale-but-useful body.
+    """
+    async def fetch() -> dict:
+        _require_version()
+        left = await cooldown_remaining(r, memory, SOURCE_YFINANCE, TTL_COOLDOWN_YFINANCE)
+        if left is not None:
+            raise QuotesCoolingDown(left)
+
+        df, messages = await download_frame(NIGHT_TICKERS, NIGHT_PERIOD, NIGHT_INTERVAL)
+        try:
+            if is_rate_limited(messages):
+                await start_cooldown(r, memory, SOURCE_YFINANCE, TTL_COOLDOWN_YFINANCE)
+                raise QuotesRateLimited("yfinance rate limited the night quotes download")
+            body = build_envelope(df, NIGHT_TICKERS, now)
+        finally:
+            del df          # G8
+            gc.collect()
+
+        if body["reason"] == "empty":
+            await start_cooldown(r, memory, SOURCE_YFINANCE, TTL_COOLDOWN_YFINANCE)
+            logger.warning("Night quotes: both contracts empty, yfinance cooldown started")
+        elif body["reason"] is not None:
+            logger.warning(f"Night quotes: partial, missing {body['missing']}")
+        return body
+
+    async with _download_lock():
+        return await cached_json(
+            r, risk_key(KIND_NIGHT_QUOTES), None, fetch,
+            valid=valid_night_quotes, ttl_for=night_quotes_ttl
+        )
+
+
+async def get_night_view(r, memory, *, now: Callable[[], datetime] = _utc_now) -> dict:
+    """
+    What a night check reads, in the same shape the monitors' view has:
+    {asOf, source, reason, tickers, staleTickers}. Never raises for a source
+    state, and never serves a last-known body — a cooldown, refusal, error or
+    empty answer is an empty view, which the overlay reports as unavailable.
+    """
+    try:
+        body, from_cache = await get_night_quotes(r, memory, now=now)
+    except QuotesCoolingDown:
+        reason = "cooldown"
+    except QuotesRateLimited:
+        reason = "rate_limited"
+    except QuotesError as e:
+        logger.error(f"Night quotes failed: {e}")
+        reason = "error"
+    else:
+        return {
+            "asOf": body["asOf"],
+            "source": "cached" if from_cache else "fresh",
+            "reason": body["reason"],
+            "tickers": {t: _entry(body, t, False) for t in body["tickers"]},
+            "staleTickers": list(body["missing"]),
+        }
+    logger.warning(f"Night quotes {reason}: no futures price for this check")
+    return {"asOf": None, "source": "none", "reason": reason,
+            "tickers": {}, "staleTickers": list(NIGHT_TICKERS)}

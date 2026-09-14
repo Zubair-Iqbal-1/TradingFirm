@@ -870,3 +870,96 @@ async def test_quotes_view_cache_hit_no_last_known_write(fake_download):
     assert (view["source"], view["reason"], view["staleTickers"]) == ("cached", None, [])
     assert r.set_calls == []
     assert len(fake.calls) == 1
+
+
+# ── Night quotes (Part 3.4b decision 7) ──────────────────────────
+
+KEY_NIGHT = "tf:risk:cache:night_quotes"
+
+
+@pytest.mark.asyncio
+async def test_night_quotes_download_params_pinned(fake_download):
+    fake = fake_download(frame=_frame(quotes.NIGHT_TICKERS))
+    r = FakeRedis()
+    body, from_cache = await quotes.get_night_quotes(r, MemoryCooldowns(), now=_now)
+
+    assert quotes.NIGHT_TICKERS == ("ES=F", "NQ=F")
+    tickers, kwargs = fake.calls[0]
+    assert tickers == "ES=F NQ=F"
+    assert kwargs == {
+        "period": "5d", "interval": "1d", "group_by": "ticker", "threads": False,
+        "progress": False, "auto_adjust": True, "timeout": 5,
+    }
+    assert "session" not in kwargs
+    assert (from_cache, body["reason"], body["missing"]) == (False, None, [])
+    assert list(body["tickers"]) == list(quotes.NIGHT_TICKERS)
+    assert json.loads(r.store[KEY_NIGHT]) == body
+    assert KEY_QUOTES not in r.store                       # never the core key
+
+
+@pytest.mark.asyncio
+async def test_night_quotes_cache_ttl(fake_download):
+    fake = fake_download(frame=_frame(quotes.NIGHT_TICKERS))
+    r = FakeRedis()
+    await quotes.get_night_quotes(r, MemoryCooldowns(), now=_now)
+    assert r.ttls[KEY_NIGHT] == 600                        # under the 30-minute slot
+    _, from_cache = await quotes.get_night_quotes(r, MemoryCooldowns(), now=_now)
+    assert from_cache is True and len(fake.calls) == 1
+
+    # A degraded answer is kept for 120 s only.
+    fake = fake_download(frame=_frame(quotes.NIGHT_TICKERS, empty_for=("NQ=F",)))
+    r = FakeRedis()
+    body, _ = await quotes.get_night_quotes(r, MemoryCooldowns(), now=_now)
+    assert body["reason"] == "partial" and body["missing"] == ["NQ=F"]
+    assert r.ttls[KEY_NIGHT] == 120
+
+
+@pytest.mark.asyncio
+async def test_night_quotes_cooldown_shared_with_core(fake_download):
+    # A cooldown the core download started also stops the night one.
+    fake = fake_download(frame=_frame(quotes.NIGHT_TICKERS))
+    r = FakeRedis()
+    r.store[COOL_YF], r.ttls[COOL_YF] = "1", 600
+    with pytest.raises(QuotesCoolingDown):
+        await quotes.get_night_quotes(r, MemoryCooldowns(), now=_now)
+    assert fake.calls == []
+
+    # A refusal in the night download starts that same source-wide cooldown.
+    fake = fake_download(frame=_frame(quotes.NIGHT_TICKERS), log=RATE_LIMIT_LOGS[0])
+    r = FakeRedis()
+    with pytest.raises(QuotesRateLimited):
+        await quotes.get_night_quotes(r, MemoryCooldowns(), now=_now)
+    assert r.store[COOL_YF] and KEY_NIGHT not in r.store
+
+    # Both contracts empty: cached 120 s and the cooldown starts (1.x's silent block).
+    fake = fake_download(frame=_frame(quotes.NIGHT_TICKERS, empty_for=quotes.NIGHT_TICKERS))
+    r = FakeRedis()
+    body, _ = await quotes.get_night_quotes(r, MemoryCooldowns(), now=_now)
+    assert body["reason"] == "empty" and r.ttls[KEY_NIGHT] == 120 and r.store[COOL_YF]
+
+
+@pytest.mark.asyncio
+async def test_night_quotes_no_last_known(fake_download):
+    """No last-known copy: an hours-old futures price would be a wrong cap."""
+    fake_download(frame=_frame(quotes.NIGHT_TICKERS))
+    r = FakeRedis()
+    await quotes.get_night_quotes(r, MemoryCooldowns(), now=_now)
+    assert "tf:risk:cache:quotes_last" not in r.store
+    assert set(r.store) == {KEY_NIGHT}
+
+    # The view a night check reads: no prices on a cooldown, and it never raises.
+    r.store[COOL_YF], r.ttls[COOL_YF] = "1", 600
+    r.store.pop(KEY_NIGHT)
+    view = await quotes.get_night_view(r, MemoryCooldowns(), now=_now)
+    assert view == {"asOf": None, "source": "none", "reason": "cooldown",
+                    "tickers": {}, "staleTickers": ["ES=F", "NQ=F"]}
+
+
+@pytest.mark.asyncio
+async def test_night_view_carries_prices_and_staleness(fake_download):
+    fake_download(frame=_frame(quotes.NIGHT_TICKERS, empty_for=("NQ=F",)))
+    view = await quotes.get_night_view(FakeRedis(), MemoryCooldowns(), now=_now)
+    assert view["source"] == "fresh" and view["reason"] == "partial"
+    assert view["staleTickers"] == ["NQ=F"] and "NQ=F" not in view["tickers"]
+    assert view["tickers"]["ES=F"]["close"] == [100.5, 100.5, 100.5]
+    assert view["tickers"]["ES=F"]["asOf"] == NOW.isoformat() and view["tickers"]["ES=F"]["stale"] is False

@@ -38,6 +38,7 @@ KIND_FRED = "fred"       # 3.2: one FRED series
 # 3.3: the last *full* quotes body, served with stale: true when the source
 # refuses, cools down or comes back degraded (spec 3.3 decision 2).
 KIND_QUOTES_LAST = "quotes_last"
+KIND_NIGHT_QUOTES = "night_quotes"   # 3.4b: ES=F / NQ=F for a night check
 
 # TTLs (seconds)
 TTL_QUOTES = 300     # 5 min (plan 3.2)
@@ -47,6 +48,7 @@ TTL_FRED = 21600     # 6 hours (plan 3.2)
 # transient empty FRED answer must not blank a series for six hours (Part
 # 3.2 decision 3). Same number as data-engine's TTL_DOSSIER_ERROR.
 TTL_DEGRADED = 120
+TTL_NIGHT_QUOTES = 600   # under the 30-min night slot, so every slot downloads fresh (3.4b)
 TTL_LAST_KNOWN = 86400   # 24 h: how long a last-known quotes body may stand in
 # 3.6a: the last *full* envelope per FRED series, served with stale: true when
 # the source refuses, cools down, errors or answers empty (spec 3.6a decision
