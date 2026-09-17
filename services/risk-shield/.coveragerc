@@ -1,0 +1,6 @@
+# Coverage for the CI workflow (.github/workflows/tests.yml) and the twin's
+# pytest --cov runs. tests/ is omitted so TOTAL is application code only; the
+# live scripts in tests/ are never imported by the suite anyway.
+[run]
+omit =
+    tests/*

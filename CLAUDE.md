@@ -42,16 +42,18 @@ uvicorn main:app --reload --port 8001
 ```
 **8001 is prod** (`tf-data-engine`, live yfinance, real keys); **8011 is the dev twin** (`tf-data-engine-dev`, fixture provider, empty Finnhub key, own database `tradingfirm_dev`, Redis DB 1). Verify parts on 8011; use 8001 for real scans.
 
-**risk-shield: 8003 is prod** (`tf-risk-shield`, real `FRED_API_KEY` and `FINNHUB_API_KEY`); **8013 is its dev twin** (`tf-risk-shield-dev`, empty FRED and Finnhub keys, `tradingfirm_dev`, Redis DB 1, data-engine = `data-engine-dev`). Tests run there:
+**risk-shield: 8003 is prod** (`tf-risk-shield`, real `FRED_API_KEY` and `FINNHUB_API_KEY`); **8013 is its dev twin** (`tf-risk-shield-dev`, empty FRED and Finnhub keys, `tradingfirm_dev`, Redis DB 1, data-engine = `data-engine-dev`). Tests run there.
+
+**`.github/workflows/tests.yml` is the reference test list from now on** (CI on every push and PR, `docs/specs/ci-coverage.md`). The two commands below copy it: a new `tests/test_*.py` file goes into the workflow first, then here. CI fails on any failed or skipped test; coverage omits `tests/` (`.coveragerc`).
 ```bash
 docker compose --profile dev up -d --build risk-shield-dev
-docker exec tf-risk-shield-dev pytest tests/test_config.py tests/test_cache.py tests/test_db.py tests/test_lifespan.py tests/test_health.py tests/test_migration.py tests/test_ratelimit.py tests/test_fred_client.py tests/test_monitors_data.py tests/test_live_guard.py tests/test_monitors.py tests/test_scoring.py tests/test_scheduler_gating.py tests/test_alert_throttle.py tests/test_scheduler.py tests/test_market_endpoints.py tests/test_finnhub_client.py tests/test_calendar.py tests/test_market_news.py tests/test_fred_view.py tests/test_macro_inputs.py tests/test_wallclock.py tests/test_ai_agent_client.py tests/test_macro_brief_endpoints.py tests/test_macro_brief_flow.py tests/test_overlay.py tests/test_weekend.py tests/test_weekend_inputs.py tests/test_weekend_gate.py tests/test_weekend_row.py tests/test_weekend_log.py -v
+docker exec tf-risk-shield-dev pytest tests/test_config.py tests/test_cache.py tests/test_db.py tests/test_lifespan.py tests/test_health.py tests/test_migration.py tests/test_ratelimit.py tests/test_fred_client.py tests/test_monitors_data.py tests/test_live_guard.py tests/test_monitors.py tests/test_scoring.py tests/test_scheduler_gating.py tests/test_alert_throttle.py tests/test_scheduler.py tests/test_market_endpoints.py tests/test_finnhub_client.py tests/test_calendar.py tests/test_market_news.py tests/test_fred_view.py tests/test_macro_inputs.py tests/test_wallclock.py tests/test_ai_agent_client.py tests/test_macro_brief_endpoints.py tests/test_macro_brief_flow.py tests/test_overlay.py tests/test_weekend.py tests/test_weekend_inputs.py tests/test_weekend_gate.py tests/test_weekend_row.py tests/test_weekend_log.py -v --cov=. --cov-report=term-missing
 ```
 
 Tests run inside `tf-data-engine-dev` (host pandas ≠ pinned version). It is a separate container from prod `tf-data-engine`, so prod keeps running: fixture provider, its own database `tradingfirm_dev`, Redis DB 1, pytest baked in via the Dockerfile `dev` stage. Rebuild with `--build` after changing `requirements*.txt`:
 ```bash
 docker compose --profile dev up -d data-engine-dev
-docker exec tf-data-engine-dev pytest tests/test_fixture_provider.py tests/test_provider_factory.py tests/test_scanner_pipeline.py tests/test_news_ingest.py tests/test_news_market.py -v
+docker exec tf-data-engine-dev pytest tests/test_bars_endpoint.py tests/test_bars_store.py tests/test_cooldowns.py tests/test_dossier.py tests/test_earnings_dates.py tests/test_earnings_reaction.py tests/test_edgar.py tests/test_finnhub_fetchers.py tests/test_fixture_provider.py tests/test_indicators.py tests/test_indicators_endpoint.py tests/test_levels.py tests/test_news_ingest.py tests/test_news_market.py tests/test_provider_factory.py tests/test_refresh_endpoint.py tests/test_scanner_pipeline.py -v --cov=. --cov-report=term-missing
 ./scripts/dev-db.sh                  # once: create tradingfirm_dev + apply migrations (only needed to poke the dev API on :8011)
 ```
 

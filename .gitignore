@@ -51,3 +51,7 @@ htmlcov/
 
 # ── Antigravity agent data ──
 .gemini/
+
+# ── Coverage ──
+.coverage
+.coverage.*

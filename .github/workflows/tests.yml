@@ -1,0 +1,157 @@
+# Unit tests for data-engine and risk-shield (spec docs/specs/ci-coverage.md).
+#
+# Each suite runs in its service's Dockerfile `dev` stage, the same image as
+# the compose dev twin, with the source and infra/supabase/migrations mounted
+# the way docker-compose.yml mounts them. No Postgres or Redis: every test
+# fakes them. `--network none`, so an unmocked call fails instead of reaching
+# yfinance, Finviz, FRED, Finnhub or EDGAR (G6/G7).
+#
+# Never add here: secrets or API keys, docker compose (prod or dev), or the
+# live scripts in tests/ (*_live.py, full_scan_test.py, record_*, smoke_*,
+# dry_run_*). Only tests/test_*.py files are named.
+#
+# This list is the reference test list; CLAUDE.md copies it.
+
+name: tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  suite:
+    name: ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: data-engine
+            # Twin env from docker-compose.yml (data-engine-dev), non-secret
+            # values only; keys stay empty as in the twin.
+            env: >-
+              -e SERVICE_NAME=data-engine-dev
+              -e SERVICE_PORT=8001
+              -e DATA_PROVIDER=fixture
+              -e FINNHUB_API_KEY=
+              -e EDGAR_USER_AGENT=
+              -e ALPHAVANTAGE_API_KEY=
+            tests: >-
+              tests/test_bars_endpoint.py
+              tests/test_bars_store.py
+              tests/test_cooldowns.py
+              tests/test_dossier.py
+              tests/test_earnings_dates.py
+              tests/test_earnings_reaction.py
+              tests/test_edgar.py
+              tests/test_finnhub_fetchers.py
+              tests/test_fixture_provider.py
+              tests/test_indicators.py
+              tests/test_indicators_endpoint.py
+              tests/test_levels.py
+              tests/test_news_ingest.py
+              tests/test_news_market.py
+              tests/test_provider_factory.py
+              tests/test_refresh_endpoint.py
+              tests/test_scanner_pipeline.py
+          - service: risk-shield
+            # Twin env from docker-compose.yml (risk-shield-dev). The guard
+            # tests (test_twin_never_*) skip without SERVICE_NAME and assert
+            # these overrides, so they must match compose.
+            env: >-
+              -e SERVICE_NAME=risk-shield-dev
+              -e SERVICE_PORT=8003
+              -e FRED_API_KEY=
+              -e FINNHUB_API_KEY=
+              -e WEEKEND_WRITE_TOKEN=
+              -e SCHEDULER_ENABLED=false
+              -e HEALTH_CHANNEL=tf:risk:dev:health
+              -e NEWS_POLL_ENABLED=false
+              -e DATA_ENGINE_URL=http://data-engine-dev:8001
+              -e MACRO_BRIEF_ENABLED=false
+              -e AI_AGENT_URL=http://ai-agent.invalid:8004
+            tests: >-
+              tests/test_config.py
+              tests/test_cache.py
+              tests/test_db.py
+              tests/test_lifespan.py
+              tests/test_health.py
+              tests/test_migration.py
+              tests/test_ratelimit.py
+              tests/test_fred_client.py
+              tests/test_monitors_data.py
+              tests/test_live_guard.py
+              tests/test_monitors.py
+              tests/test_scoring.py
+              tests/test_scheduler_gating.py
+              tests/test_alert_throttle.py
+              tests/test_scheduler.py
+              tests/test_market_endpoints.py
+              tests/test_finnhub_client.py
+              tests/test_calendar.py
+              tests/test_market_news.py
+              tests/test_fred_view.py
+              tests/test_macro_inputs.py
+              tests/test_wallclock.py
+              tests/test_ai_agent_client.py
+              tests/test_macro_brief_endpoints.py
+              tests/test_macro_brief_flow.py
+              tests/test_overlay.py
+              tests/test_weekend.py
+              tests/test_weekend_inputs.py
+              tests/test_weekend_gate.py
+              tests/test_weekend_row.py
+              tests/test_weekend_log.py
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the dev stage
+        run: docker build --target dev -t "tf-${{ matrix.service }}-dev:ci" "services/${{ matrix.service }}"
+
+      - name: Run the suite with coverage
+        run: |
+          set -o pipefail
+          start=$(date +%s)
+          rc=0
+          # .coveragerc (omit tests/*) is read from /app. The mounts are
+          # read-only, so nothing the run writes lands in the tree.
+          docker run --rm --network none \
+            -e PYTHONDONTWRITEBYTECODE=1 \
+            -e COVERAGE_FILE=/tmp/.coverage \
+            ${{ matrix.env }} \
+            -v "$GITHUB_WORKSPACE/services/${{ matrix.service }}:/app:ro" \
+            -v "$GITHUB_WORKSPACE/infra/supabase/migrations:/migrations:ro" \
+            "tf-${{ matrix.service }}-dev:ci" \
+            pytest ${{ matrix.tests }} -v -rs -p no:cacheprovider \
+              --cov=. --cov-report=term-missing \
+            | tee pytest.log || rc=$?
+          echo "Suite wall-clock: $(( $(date +%s) - start ))s" | tee -a pytest.log
+          exit "$rc"   # pytest's exit code: any failed test fails the job
+
+      - name: Fail on skipped tests
+        # A skip means a lost mount or twin env (see the spec); it must turn
+        # the run red, not just show up in the log.
+        run: |
+          summary=$(grep -E '^=+ .*[0-9]+ (passed|failed|error).* in [0-9.]+s' pytest.log | tail -1)
+          if [ -z "$summary" ]; then echo "::error::no pytest summary line found"; exit 1; fi
+          echo "$summary"
+          if echo "$summary" | grep -q 'skipped'; then
+            echo "::error::tests were skipped: $summary"
+            exit 1
+          fi
+
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "### ${{ matrix.service }}"
+            grep -oE 'collected [0-9]+ items' pytest.log | head -1 || true
+            grep -E '^=+ .* in [0-9.]+s' pytest.log | tail -1 || true
+            grep -E '^TOTAL ' pytest.log || true
+            grep -E '^Suite wall-clock' pytest.log || true
+          } | sed 's/^/    /' >> "$GITHUB_STEP_SUMMARY"

@@ -216,8 +216,8 @@ FastAPI app. Key pieces:
   default) and `fixture` (`fixture_provider.py`, replays
   `tests/fixtures/{daily,hourly,info}/<TICKER>.json` with no network — for
   tests only, selectable via `DATA_PROVIDER=fixture`).
-- **`requirements-dev.txt`** — `pytest` + `pytest-asyncio` + `respx` on top of
-  `requirements.txt`; baked into the Dockerfile's `dev` stage only (the
+- **`requirements-dev.txt`** — `pytest` + `pytest-asyncio` + `respx` +
+  `pytest-cov` (same pins in risk-shield's) on top of `requirements.txt`; baked into the Dockerfile's `dev` stage only (the
   `prod` stage never sees it). Tests run in `tf-data-engine-dev`, see
   Infrastructure below and `CLAUDE.md` Commands. `pytest.ini` restricts
   discovery to `tests/test_*.py` so a bare `pytest` cannot collect the
@@ -530,6 +530,16 @@ Google-sign-in scaffolding under `web/lib/firebase/` has been removed.
   `/migrations` for the tests that assert migration text. Phase 3 tests run
   there:
   `docker exec tf-risk-shield-dev pytest tests/test_config.py ... -v`.
+- **CI: [`.github/workflows/tests.yml`](../.github/workflows/tests.yml)** —
+  GitHub Actions on every push and pull request. One job per service
+  (data-engine, risk-shield) builds the Dockerfile's `dev` stage and runs the
+  explicit `tests/test_*.py` list inside it with `--network none`, the source
+  and `infra/supabase/migrations` mounted read-only, and the twin's
+  non-secret env (keys empty). No Postgres, Redis, compose, secrets or live
+  scripts: every test fakes its dependencies. A failed **or skipped** test
+  fails the job (a skip means a lost mount or twin env). Coverage via
+  `pytest-cov`, `.coveragerc` omitting `tests/`, no threshold yet. The
+  workflow's lists are the reference; `CLAUDE.md` copies them.
 - **Startup bounds differ between the two services.** risk-shield wraps
   each dependency connection in `asyncio.wait_for(config.STARTUP_TIMEOUT)`
   (5 s, worst-case boot ~10 s); data-engine does not, and a slow-but-not-
