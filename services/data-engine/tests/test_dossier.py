@@ -775,11 +775,18 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 
 @pytest.fixture
-def app_state():
+def app_state(monkeypatch):
     """Point the app at fakes and hand back the pieces a test needs to poke.
     `TestClient` is created without the lifespan (it would open real Redis
     and Postgres connections), so every dependency is set here."""
+    from dossier.assemble import DossierContext
     from providers.fixture_provider import FixtureProvider
+
+    # Freeze the endpoint's clock to NOW (the 2026-09-09 session), as 2325d49
+    # did for one test. Without it staleWeekdays compares TODAY's bars with the
+    # real session: after 2026-09-10 the refresh path runs and its upstream
+    # calls land in the budget. Test-only: the code under test is unchanged.
+    monkeypatch.setattr(DossierContext, "now_utc", lambda self: NOW)
 
     pool = FakePool(bars={(TICKER, "1d"): _bars(60, TODAY)})
     redis = FakeRedis()
@@ -799,12 +806,8 @@ def _get(url: str = f"/dossier/{TICKER}"):
     return TestClient(main.app).get(url)
 
 
-def test_dossier_camelcase_shape(_no_network, app_state, monkeypatch):
-    # Freeze the endpoint's clock to NOW (the 2026-09-09 session). Without it
-    # staleWeekdays compares TODAY's bars with the real session and the test
-    # broke at the 2026-09-10 close. Test-only: the code under test is unchanged.
-    from dossier.assemble import DossierContext
-    monkeypatch.setattr(DossierContext, "now_utc", lambda self: NOW)
+def test_dossier_camelcase_shape(_no_network, app_state):
+    # The clock is frozen to NOW by the app_state fixture.
     _mount_all(_no_network)
     resp = _get()
     assert resp.status_code == 200
