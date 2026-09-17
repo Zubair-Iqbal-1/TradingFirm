@@ -37,7 +37,7 @@ Nothing else changes. `earnings_surprises`, `recommendations` and `profile` take
 
 | Test | Proves |
 |---|---|
-| new `test_dossier.py::test_assemble_passes_ctx_today_to_fetchers` | With `_ctx(now=datetime(2027, 3, 15, 15, tzinfo=utc))`, the mocked `/company-news` `to` and `/calendar/earnings` `from`/`to` are derived from 2027-03-15, and a filing dated 2027-03-10 is kept by `build_filings`. This fails before the change. |
+| new `test_dossier.py::test_assemble_passes_ctx_today_to_fetchers` | With `_ctx(now=datetime(2027, 3, 17, 22, tzinfo=utc))` (a Wednesday after the close, like `NOW`, so the bars are not stale), the mocked `/company-news` `to` and `/calendar/earnings` `from`/`to` are derived from 2027-03-17, and a filing dated 2027-03-12 is kept by `build_filings`. This fails before the change. |
 | `test_caps_applied_and_flagged`, `test_filings_block_flag_flags_truncated` | Unchanged. Must pass under time travel at 2026-09-17, 2026-10-01, 2027-01-01, 2027-04-01, 2027-07-01 and 2027-09-30. |
 | full data-engine suite (17 files) | Twin run with `--cov` passes 453 (452 + the new test), 0 skipped. The same time-travel dates give 453 passed at each. |
 

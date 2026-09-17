@@ -108,7 +108,7 @@ jobs:
               tests/test_weekend_log.py
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Build the dev stage
         run: docker build --target dev -t "tf-${{ matrix.service }}-dev:ci" "services/${{ matrix.service }}"
@@ -146,12 +146,17 @@ jobs:
           fi
 
       - name: Job summary
+        # The same 4 lines go to the step summary and to a notice annotation:
+        # job logs need a GitHub login, annotations show on the run page
+        # without one.
         if: always()
         run: |
-          {
-            echo "### ${{ matrix.service }}"
-            grep -oE 'collected [0-9]+ items' pytest.log | head -1 || true
-            grep -E '^=+ .* in [0-9.]+s' pytest.log | tail -1 || true
-            grep -E '^TOTAL ' pytest.log || true
-            grep -E '^Suite wall-clock' pytest.log || true
-          } | sed 's/^/    /' >> "$GITHUB_STEP_SUMMARY"
+          [ -f pytest.log ] || { echo "::warning title=${{ matrix.service }}::no pytest.log"; exit 0; }
+          lines=$(
+            grep -oE 'collected [0-9]+ items' pytest.log | head -1
+            grep -E '^=+ .* in [0-9.]+s' pytest.log | tail -1 | sed -E 's/^=+ //; s/ =+$//'
+            grep -E '^TOTAL ' pytest.log | tr -s ' '
+            grep -E '^Suite wall-clock' pytest.log
+          )
+          { echo "### ${{ matrix.service }}"; echo '```'; echo "$lines"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice title=${{ matrix.service }}::$(echo "$lines" | sed 's/%/%25/g' | sed ':a;N;$!ba;s/\n/%0A/g')"

@@ -8,7 +8,7 @@ A GitHub Actions workflow, `.github/workflows/tests.yml`, runs on every push and
 
 ### Approval changes (2026-09-17)
 
-1. Decision 1 → (a): CI runs **all** data-engine test files; CLAUDE.md copies the list and says the workflow is the reference list from now on. (The draft said 15 files; the directory holds **17**, 452 tests.)
+1. Decision 1 → (a): CI runs **all 17** data-engine test files (452 tests); CLAUDE.md copies the list and says the workflow is the reference list from now on.
 2. Decision 2 → (a): a separate `fix:` commit first, same method as `2325d49`, plus a grep of both suites for hard-coded dates compared against the real clock, every hit listed as frozen / not needed / deferred.
 3. Coverage uses `.coveragerc` `omit = tests/*` per service instead of a bare `--cov=.`, so TOTAL is app code only.
 4. `-rs` stays **and** the workflow fails on skips > 0 (grep the pytest summary line for `skipped`, exit 1).
@@ -50,7 +50,7 @@ On 2026-09-17, in throwaway `docker run --rm --network none` containers from the
 ## Workflow as shipped
 
 - `on: push, pull_request`; `permissions: contents: read`; one matrix job over `data-engine` / `risk-shield`, `fail-fast: false`, 20 min timeout.
-- Steps: checkout → `docker build --target dev` → `docker run --rm --network none` with `PYTHONDONTWRITEBYTECODE=1`, `COVERAGE_FILE=/tmp/.coverage`, the twin env, both read-only mounts, `pytest <list> -v -rs -p no:cacheprovider --cov=. --cov-report=term-missing | tee pytest.log` under `pipefail`; the step prints the suite wall-clock and exits with pytest's code → **skip check** (the last summary line must exist and must not contain `skipped`) → job summary (collected, summary line, `TOTAL`, wall-clock).
+- Steps: checkout → `docker build --target dev` → `docker run --rm --network none` with `PYTHONDONTWRITEBYTECODE=1`, `COVERAGE_FILE=/tmp/.coverage`, the twin env, both read-only mounts, `pytest <list> -v -rs -p no:cacheprovider --cov=. --cov-report=term-missing | tee pytest.log` under `pipefail`; the step prints the suite wall-clock and exits with pytest's code → **skip check** (the last summary line must exist and must not contain `skipped`) → job summary: the 4 lines (collected, summary line, `TOTAL`, wall-clock) go to `$GITHUB_STEP_SUMMARY` and to a `::notice` annotation, because job logs need a GitHub login and annotations show on the run page without one. `actions/checkout@v5` (v4 drew a Node 20 deprecation warning on run #1).
 - Not in the workflow: API keys or `secrets.*`, any compose file, `*_live.py`, `full_scan_test.py`, `record_*`, `smoke_test_*`, `dry_run_*`.
 - **Verified locally before push** by replaying the workflow's parsed steps (fresh `:ci` images): data-engine 452 passed / 83 %, risk-shield 857 passed / 97 %; removing the migrations mount → 5 skipped → skip step exit 1; forcing the prod `HEALTH_CHANNEL` → 1 failed → run step exit 1, wall-clock still printed.
 
@@ -61,7 +61,7 @@ Method: grep both suites for `date.today`, `datetime.now`, `utcnow`, `time.time(
 | Hit | Verdict | Why |
 |---|---|---|
 | data-engine `test_dossier.py` `NOW` / `TODAY` in the endpoint tests (all 16 `_get()` callers via `app_state`) | **frozen** (`610cd67`) | `app_state` patches `DossierContext.now_utc` to `NOW`; fixed the 3 failures, and `test_dossier_camelcase_shape`'s own patch moved into the fixture |
-| data-engine `test_dossier.py::test_caps_applied_and_flagged`, `::test_filings_block_flag_flags_truncated` | **deferred** (G3.5) | pass today, **fail from ~2026-10-01**. Root cause is in app code: `dossier/assemble.py` calls `recent_filings` (and `company_news`, `earnings_calendar`) without `today=`, so they read the real clock even when `ctx.now` is injected; the fixture filings dated `TODAY − i` leave the 30-day window. Not fixable by a test-only freeze |
+| data-engine `test_dossier.py::test_caps_applied_and_flagged`, `::test_filings_block_flag_flags_truncated` | **deferred** (G3.5), then fixed by `f75f16a` (`docs/specs/dossier-clock.md`) | pass today, **fail from ~2026-10-01**. Root cause is in app code: `dossier/assemble.py` calls `recent_filings` (and `company_news`, `earnings_calendar`) without `today=`, so they read the real clock even when `ctx.now` is injected; the fixture filings dated `TODAY − i` leave the 30-day window. Not fixable by a test-only freeze |
 | data-engine `TODAY` in `test_earnings_dates.py`, `test_edgar.py`, `test_finnhub_fetchers.py`, `test_earnings_reaction.py` | not needed | passed explicitly as `today=`; green under every travel date |
 | data-engine `datetime.now` in `test_news_market.py`, `test_scanner_pipeline.py`, `test_indicators_endpoint.py` | not needed | relative to the real clock on both sides, no fixed date |
 | risk-shield `NOW` / `T0` in `test_scoring`, `test_alert_throttle`, `test_fred_view`, `test_monitors_data`, `test_macro_brief_flow`, `test_macro_brief_endpoints`, `test_weekend_inputs`, `test_market_news`, `test_wallclock` | not needed | injected into the code under test; green under every travel date |
@@ -76,4 +76,4 @@ Not applicable: no tables, keys or caches.
 
 1. `fix: freeze the dossier endpoint clock in the app_state fixture` (`610cd67`)
 2. `feat: CI workflow and pytest-cov`: the workflow, `.coveragerc` ×2, both `requirements-dev.txt`, `.gitignore` (`.coverage`), CLAUDE.md lists + reference line + `--cov`, `docs/overview.md`, `docs/progress.md`, this spec.
-3. `docs:` commit recording the green run link.
+3. `docs:` commit recording run [#1](https://github.com/Zubair-Iqbal-1/TradingFirm/actions/runs/35200317643) (green): data-engine 452 passed / 0 skipped / 83 % / 20 s, risk-shield 857 passed / 0 skipped / 97 % / 19 s, plus the annotation step and `actions/checkout@v5`.
