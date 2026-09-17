@@ -301,7 +301,8 @@ async def build_news(ctx: DossierContext, ticker: str, profile: dict) -> NewsSec
     from providers.context.finnhub import company_news, news_records
 
     await _check_cooldown(ctx, SOURCE_FINNHUB, TTL_COOLDOWN_FINNHUB)
-    raw = await company_news(ctx.finnhub, ticker, redis=ctx.redis, days=profile["news_days"])
+    raw = await company_news(ctx.finnhub, ticker, redis=ctx.redis, days=profile["news_days"],
+                             today=ctx.now_utc().date())
 
     rows = news_records(ticker, raw)
     if ctx.pool is not None and rows:
@@ -346,7 +347,8 @@ async def build_events(ctx: DossierContext, ticker: str, profile: dict) -> Event
     fetch_error: Optional[Exception] = None
     try:
         await _check_cooldown(ctx, SOURCE_FINNHUB, TTL_COOLDOWN_FINNHUB)
-        cal_raw = await earnings_calendar(ctx.finnhub, ticker, redis=ctx.redis)
+        cal_raw = await earnings_calendar(ctx.finnhub, ticker, redis=ctx.redis,
+                                          today=ctx.now_utc().date())
         sur_raw = await earnings_surprises(ctx.finnhub, ticker, redis=ctx.redis)
         rows = calendar_events(ticker, cal_raw) + surprise_events(ticker, sur_raw)
         if ctx.pool is not None and rows:
@@ -421,6 +423,7 @@ async def build_filings(ctx: DossierContext, ticker: str, profile: dict) -> Fili
         forms=profile["filing_forms"],
         days=profile["filing_days"],
         redis=ctx.redis,
+        today=ctx.now_utc().date(),
     )
 
     rows = sorted(rows, key=lambda r: r.get("filed_on") or "", reverse=True)

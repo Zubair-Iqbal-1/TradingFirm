@@ -431,6 +431,35 @@ async def test_horizon_profile_drives_windows(_no_network):
 
 
 @pytest.mark.asyncio
+async def test_assemble_passes_ctx_today_to_fetchers(_no_network):
+    """An injected ctx.now reaches the news, earnings-calendar and filings
+    windows (spec dossier-clock): without `today=` they read the real clock."""
+    from providers.context.finnhub import CALENDAR_LOOKAHEAD_DAYS, CALENDAR_LOOKBACK_DAYS
+
+    later = datetime(2027, 3, 17, 22, 0, tzinfo=timezone.utc)      # Wednesday, after the close
+    day = later.date()
+    filed = (day - timedelta(days=5)).isoformat()
+    cols = {
+        "accessionNumber": ["0000320193-27-000001"], "filingDate": [filed], "reportDate": [filed],
+        "acceptanceDateTime": [f"{filed}T12:00:00.000Z"], "form": ["8-K"],
+        "primaryDocument": ["doc.htm"], "primaryDocDescription": [""], "items": ["2.02"],
+    }
+    _mount_all(_no_network, submissions={"cik": "320193", "filings": {"recent": cols, "files": []}})
+    pool = FakePool(bars={(TICKER, "1d"): _bars(60, day)})
+    d = await assemble(_ctx(now=later, pool=pool), TICKER, HORIZON_SWING)
+
+    def params(path):
+        call = [c for c in _no_network.calls if path in str(c.request.url)][0]
+        return dict(httpx.URL(str(call.request.url)).params)
+
+    assert params("company-news")["to"] == day.isoformat()
+    cal = params("calendar/earnings")
+    assert cal["from"] == (day - timedelta(days=CALENDAR_LOOKBACK_DAYS)).isoformat()
+    assert cal["to"] == (day + timedelta(days=CALENDAR_LOOKAHEAD_DAYS)).isoformat()
+    assert [r.filed_on for r in d.sections.filings.rows] == [date.fromisoformat(filed)]
+
+
+@pytest.mark.asyncio
 async def test_earnings_null_reactions_passthrough(_no_network):
     """2.3's `reactions: null` (no confirmed report) is passed through as-is,
     with the section still `ok`."""
