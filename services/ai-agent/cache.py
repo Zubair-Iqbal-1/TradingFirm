@@ -1,5 +1,5 @@
 """
-TradingFirm — AI Agent Redis Layer (Part 4.1)
+TradingFirm — AI Agent Redis Layer (Parts 4.1, 4.2)
 
 The `tf:ai:` namespace, the daily LLM call counter and the provider
 cooldown, plus the in-process fallbacks used when Redis is absent or
@@ -10,10 +10,12 @@ images, no shared package), with one difference that matters: every key here
 lives under `tf:ai:`. `tf:cache:` is data-engine's and `tf:risk:` is
 risk-shield's; all three share Redis DB 0 in prod.
 
-4.1 has no read-through cache — there is nothing to cache yet. This module is
-state only.
+Part 4.2 adds the first cached thing — one classification per headline
+digest — plus the classifier's own day counter and the running cost totals.
 """
 
+import hashlib
+import json
 import logging
 import time as _time
 from datetime import datetime, timezone
@@ -38,10 +40,29 @@ SOURCE_LLM = "openrouter"
 
 # State names.
 STATE_LLM_CALLS = "llm_calls"
+STATE_CLASSIFIER_CALLS = "classifier_calls"       # Part 4.2's second cap
+STATE_COST_DAY = "cost_day"
+STATE_COST_MONTH = "cost_month"
+STATE_COST_MISSING = "cost_missing"
+
+# Part 4.2: the classification cache, `tf:ai:classify:{digest}`.
+CLASSIFY_PREFIX = f"{AI_PREFIX}classify:"
 
 # The day counter's TTL: 36 h, long enough that a DST day cannot expire its
 # own key early, short enough that yesterday's keys disappear on their own.
+# This is for the two *reservation* counters, which must disappear.
 TTL_DAY_COUNTER = 129600
+
+# The cost keys' TTL: 40 days (Part 4.2). Long enough to hold a full month of
+# day-by-day totals beside the month-to-date figure, which is what an admin
+# panel will chart later. cost_missing shares it so a historical day's total
+# is never read without its caveat.
+TTL_COST = 3456000
+
+# The classification cache's TTL: 7 days. That is data-engine's
+# NEWS_MARKET_MAX_HOURS (168 h), so nothing the market-news window can return
+# is ever re-sent to the model.
+TTL_CLASSIFY = 604800
 
 # Every daily boundary in this repo is ET (risk-shield's sessions, 3.6b's
 # brief slots). A UTC day would reset the cap at 20:00 ET, mid after-hours.
@@ -81,10 +102,57 @@ def state_key(name: str) -> str:
     return f"{STATE_PREFIX}{canonical(name).lower()}"
 
 
-def day_counter_key(now: Optional[datetime] = None) -> str:
-    """`tf:ai:state:llm_calls:{YYYY-MM-DD}` on the ET day. Built from
-    state_key + et_day so there is exactly one spelling of it."""
-    return f"{state_key(STATE_LLM_CALLS)}:{et_day(now)}"
+def et_month(now: Optional[datetime] = None) -> str:
+    """The ET calendar month as YYYY-MM, on the same boundary as et_day so a
+    month never rolls over at a different instant than its last day."""
+    return et_day(now)[:7]
+
+
+def day_counter_key(now: Optional[datetime] = None, *, name: str = STATE_LLM_CALLS) -> str:
+    """`tf:ai:state:{name}:{YYYY-MM-DD}` on the ET day. Built from state_key +
+    et_day so there is exactly one spelling of it.
+
+    `name` is keyword-only and defaults to 4.1's single counter, so every
+    existing positional caller is unchanged. Part 4.2 passes
+    STATE_CLASSIFIER_CALLS to get the classifier's own cap on the very same
+    code path, and the cost counters reuse it too.
+    """
+    return f"{state_key(name)}:{et_day(now)}"
+
+
+def month_counter_key(now: Optional[datetime] = None, *, name: str = STATE_COST_MONTH) -> str:
+    """`tf:ai:state:{name}:{YYYY-MM}` on the ET month (Part 4.2)."""
+    return f"{state_key(name)}:{et_month(now)}"
+
+
+def headline_digest(title: str, url: Optional[str] = None) -> str:
+    """The one normalization every headline key goes through (G1.5).
+
+    The url identifies the article when there is one — two feeds quoting the
+    same story under different titles are one digest — and the title is the
+    fallback when there is not. Both go through canonical(), so trailing
+    whitespace or a case difference cannot split one headline into two paid
+    classifications.
+
+    It does NOT detect the same *event* reported by Reuters, CNBC and
+    Bloomberg: three urls are three digests and three payments. That is a
+    known limitation, accepted at this volume, and its fix belongs to dossier
+    assembly in Part 4.4, not here (spec 4.2 decision 20).
+    """
+    if not isinstance(title, str) or not title.strip():
+        raise ValueError("headline title must be a non-empty string")
+    if url is not None and not isinstance(url, str):
+        raise ValueError("headline url must be a string or None")
+    basis = canonical(url) if url and url.strip() else canonical(title)
+    return hashlib.sha256(basis.encode("utf-8")).hexdigest()[:32]
+
+
+def classify_key(digest: str) -> str:
+    """`tf:ai:classify:{digest}`, the digest exactly as headline_digest built
+    it — the only function that may produce one."""
+    if not isinstance(digest, str) or not digest.strip():
+        raise ValueError("digest must be a non-empty string")
+    return f"{CLASSIFY_PREFIX}{digest.strip()}"
 
 
 def cooldown_key(name: str) -> str:
@@ -150,6 +218,12 @@ class MemoryCap:
     Keyed by the ET day, so it rolls over like the Redis key does. It bounds a
     runaway loop inside *this* process only, and a restart clears it — which
     is the fail-open half of the bargain, stated in spec 4.1 decision 4.
+
+    One instance per counter, never one shared instance with namespaced keys
+    (Part 4.2): the provider owns the global cap's fallback and the classifier
+    owns its own. Two objects cost nothing and keep the key space trivially
+    correct — a namespaced key here would only re-encode what the owning
+    object already says.
     """
 
     def __init__(self):
@@ -173,6 +247,8 @@ async def reserve_call(
     r: Optional[aioredis.Redis],
     memory: MemoryCap,
     now: Optional[datetime] = None,
+    *,
+    name: str = STATE_LLM_CALLS,
 ) -> int:
     """INCR today's counter and return the new count — the reservation.
 
@@ -184,12 +260,12 @@ async def reserve_call(
     day = et_day(now)
     if r is not None:
         try:
-            key = day_counter_key(now)
+            key = day_counter_key(now, name=name)
             count = await r.incr(key)
             await r.expire(key, TTL_DAY_COUNTER, nx=True)
             return int(count)
         except Exception as e:
-            logger.warning(f"LLM call counter INCR failed, using in-process count: {e}")
+            logger.warning(f"{name} counter INCR failed, using in-process count: {e}")
     return memory.incr(day)
 
 
@@ -197,6 +273,8 @@ async def release_call(
     r: Optional[aioredis.Redis],
     memory: MemoryCap,
     now: Optional[datetime] = None,
+    *,
+    name: str = STATE_LLM_CALLS,
 ) -> None:
     """DECR today's counter. Called from exactly one place: the over-cap
     refusal, which sent no HTTP request.
@@ -211,10 +289,10 @@ async def release_call(
     day = et_day(now)
     if r is not None:
         try:
-            await r.decr(day_counter_key(now))
+            await r.decr(day_counter_key(now, name=name))
             return
         except Exception as e:
-            logger.warning(f"LLM call counter DECR failed, day may read one call high: {e}")
+            logger.warning(f"{name} counter DECR failed, day may read one call high: {e}")
     memory.decr(day)
 
 
@@ -266,3 +344,184 @@ async def start_cooldown(
             logger.warning(f"Cooldown write failed for {name}: {e}")
     if memory is not None:
         memory.start(canonical(name), cause)
+
+
+# ── Running cost totals (Part 4.2) ───────────────────────────────
+#
+# OpenRouter reports `cost` on every answer, so the only work here is adding
+# it up somewhere readable without logging into their dashboard. Three keys,
+# all on the ET boundary and all kept 40 days (TTL_COST): today's total, this
+# month's total, and a count of answers that carried no cost at all — so a
+# total is never quietly read as complete when it is not.
+#
+# Every write here is best-effort. A cost that fails to record must never fail
+# a classification the user has already paid for, so each path logs and
+# returns. Redis persistence itself is weak (spec 4.2 decision 19): these
+# figures are a floor, not an audit, until the housekeeping batch gives redis
+# a declared volume and AOF.
+
+
+class MemoryCost:
+    """In-process cost totals, the fallback shape MemoryCap and
+    MemoryCooldowns already use. Lost on restart, like the rest."""
+
+    def __init__(self):
+        self._totals: dict[str, float] = {}
+        self._missing: dict[str, int] = {}
+
+    def add(self, day: str, month: str, amount: float) -> None:
+        self._totals[day] = self._totals.get(day, 0.0) + amount
+        self._totals[month] = self._totals.get(month, 0.0) + amount
+
+    def add_missing(self, day: str) -> None:
+        self._missing[day] = self._missing.get(day, 0) + 1
+
+    def total(self, period: str) -> float:
+        return self._totals.get(period, 0.0)
+
+    def missing(self, day: str) -> int:
+        return self._missing.get(day, 0)
+
+
+async def record_cost(
+    r: Optional[aioredis.Redis],
+    memory: MemoryCost,
+    cost: Optional[float],
+    now: Optional[datetime] = None,
+) -> None:
+    """Add one answer's reported cost to today's and this month's totals.
+
+    `cost` None or unparseable counts as *missing*, never as zero: a gateway
+    that stops reporting cost must show up as a caveat on the total rather
+    than as a suspiciously cheap day.
+    """
+    day, month = et_day(now), et_month(now)
+    amount = None
+    if cost is not None:
+        try:
+            amount = float(cost)
+        except (TypeError, ValueError):
+            amount = None
+    if amount is None or amount != amount or amount in (float("inf"), float("-inf")):
+        if r is not None:
+            try:
+                key = day_counter_key(now, name=STATE_COST_MISSING)
+                await r.incr(key)
+                await r.expire(key, TTL_COST, nx=True)
+                return
+            except Exception as e:
+                logger.warning(f"cost_missing INCR failed: {e}")
+        memory.add_missing(day)
+        return
+
+    if r is not None:
+        try:
+            day_key = day_counter_key(now, name=STATE_COST_DAY)
+            month_key = month_counter_key(now, name=STATE_COST_MONTH)
+            await r.incrbyfloat(day_key, amount)
+            await r.expire(day_key, TTL_COST, nx=True)
+            await r.incrbyfloat(month_key, amount)
+            await r.expire(month_key, TTL_COST, nx=True)
+            return
+        except Exception as e:
+            logger.warning(f"cost total INCRBYFLOAT failed, totals under-report: {e}")
+    memory.add(day, month, amount)
+
+
+async def read_usage(
+    r: Optional[aioredis.Redis],
+    memory_caps: dict[str, MemoryCap],
+    memory_cost: MemoryCost,
+    now: Optional[datetime] = None,
+) -> dict:
+    """The numbers behind `GET /usage`: both day counters, the cost-missing
+    count, and today's and this month's totals.
+
+    Redis is the source of truth; if it is absent or the read raises, the
+    in-process state answers and `source` says "memory" so a small number is
+    never mistaken for a quiet day. `memory_caps` maps a state name to the
+    MemoryCap that owns it.
+    """
+    day, month = et_day(now), et_month(now)
+    if r is not None:
+        try:
+            values = await r.mget([
+                day_counter_key(now, name=STATE_LLM_CALLS),
+                day_counter_key(now, name=STATE_CLASSIFIER_CALLS),
+                day_counter_key(now, name=STATE_COST_MISSING),
+                day_counter_key(now, name=STATE_COST_DAY),
+                month_counter_key(now, name=STATE_COST_MONTH),
+            ])
+        except Exception as e:
+            logger.warning(f"usage read failed, answering from in-process state: {e}")
+        else:
+            llm, classifier, missing, cost_day, cost_month = values
+            return {
+                "day": day, "month": month, "source": "redis",
+                "llmCalls": int(llm or 0),
+                "classifierCalls": int(classifier or 0),
+                "costMissing": int(missing or 0),
+                "costToday": round(float(cost_day or 0.0), 6),
+                "costMonth": round(float(cost_month or 0.0), 6),
+            }
+    return {
+        "day": day, "month": month, "source": "memory",
+        "llmCalls": memory_caps[STATE_LLM_CALLS].count(day),
+        "classifierCalls": memory_caps[STATE_CLASSIFIER_CALLS].count(day),
+        "costMissing": memory_cost.missing(day),
+        "costToday": round(memory_cost.total(day), 6),
+        "costMonth": round(memory_cost.total(month), 6),
+    }
+
+
+# ── The classification cache (Part 4.2) ──────────────────────────
+
+async def get_classifications(
+    r: Optional[aioredis.Redis],
+    digests: list[str],
+) -> dict[str, dict]:
+    """{digest: classification} for the digests already stored.
+
+    One MGET, so a batch of 30 costs one round trip. A miss, a raise or an
+    unparseable value all read as "not classified": the cost of being wrong
+    is one extra classification, and the cost of trusting a corrupt value is
+    a wrong verdict.
+    """
+    if r is None or not digests:
+        return {}
+    try:
+        values = await r.mget([classify_key(d) for d in digests])
+    except Exception as e:
+        logger.warning(f"classification cache read failed, treating all as misses: {e}")
+        return {}
+    found: dict[str, dict] = {}
+    for digest, raw in zip(digests, values):
+        if raw is None:
+            continue
+        try:
+            value = json.loads(raw)
+        except (TypeError, ValueError):
+            logger.warning("classification cache holds an unparseable value; treating as a miss")
+            continue
+        if isinstance(value, dict):
+            found[digest] = value
+    return found
+
+
+async def store_classifications(
+    r: Optional[aioredis.Redis],
+    items: dict[str, dict],
+) -> int:
+    """Store {digest: classification} for TTL_CLASSIFY. Returns how many were
+    written. Best-effort: a failure means the headline is classified again on
+    a later call, which costs one call and stores nothing wrong."""
+    if r is None or not items:
+        return 0
+    written = 0
+    for digest, value in items.items():
+        try:
+            await r.set(classify_key(digest), json.dumps(value), ex=TTL_CLASSIFY)
+            written += 1
+        except Exception as e:
+            logger.warning(f"classification cache write failed for one item: {e}")
+    return written

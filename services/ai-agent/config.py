@@ -36,7 +36,10 @@ class Settings(BaseSettings):
     service_name: str = "ai-agent"
     service_port: int = 8004
 
-    # Database (asyncpg). Nothing in 4.1 opens it; 4.2 builds the pool.
+    # Database (asyncpg). Still unopened: 4.2 writes no ai.* table — the
+    # classifier's durable record is data-engine's news_items.sentiment,
+    # reached over HTTP (spec 4.2 decision 1). The pool arrives with
+    # migration 005_ai.sql in Part 4.4.
     database_url: str = "postgresql+asyncpg://tf_user:tradingfirm_dev_2026@postgres:5432/tradingfirm"
 
     # Redis
@@ -72,6 +75,13 @@ class Settings(BaseSettings):
     # how the dev twin is nailed shut without relying on the empty key alone.
     llm_daily_call_cap: int = 100
 
+    # The classifier's own, smaller cap (Part 4.2). Separate so a batch loop
+    # cannot eat the analyst's budget: ~400 unique headlines a day at 30 per
+    # batch is ~14 calls, so 40 is about 3x headroom and still leaves 60 of
+    # llm_daily_call_cap for verdicts, judgments and the macro brief. The dev
+    # twin hard-codes it to 0.
+    llm_classifier_daily_call_cap: int = 40
+
     # Non-streaming output budget. At reasoning effort "low" roughly a fifth
     # goes to reasoning and the rest to the JSON answer.
     llm_max_tokens: int = 8000
@@ -89,11 +99,21 @@ class Settings(BaseSettings):
     llm_referer: str = ""
     llm_title: str = ""
 
+    # data-engine, for the classifier's write-back (Part 4.2). The dev twin
+    # hard-codes the dev twin's own host, so nothing on 8014 can ever write
+    # into prod's news_items — test_twin_never_writes_prod_data_engine.
+    data_engine_url: str = "http://data-engine:8001"
+
+    # Seconds, hard, per write-back call. Write-back is fail-open: a timeout
+    # is counted and logged, never raised at the caller.
+    data_engine_timeout: float = 10.0
+
     # Debug mode
     debug: bool = False
 
-    # LLM_PROVIDER / ANTHROPIC_API_KEY / GOOGLE_AI_API_KEY are still set on
-    # the prod compose block and are ignored here: one provider in code.
+    # LLM_PROVIDER / ANTHROPIC_API_KEY / GOOGLE_AI_API_KEY were dropped from
+    # the prod compose block in Part 4.2. extra="ignore" stays: an env that
+    # still carries them (an old .env, a stale container) must not fail boot.
     model_config = {"env_file": ".env", "extra": "ignore"}
 
     @property
