@@ -39,10 +39,20 @@ def body(n=2, with_ids=True, **extra):
     ], **extra}
 
 
+# The twin hard-codes LLM_CLASSIFIER_DAILY_CALL_CAP=0 (a lock, never drop
+# it), and _env_file=None would not help: that disables the dotenv file, not
+# the process environment. So every test that expects a call to go out pins
+# the cap explicitly, and the declared default is asserted from the model in
+# test_config.py instead.
+TEST_CAP = 40
+
+
 @pytest.fixture
-def client():
+def client(monkeypatch):
     saved = {k: getattr(main.app.state, k, None)
              for k in ("redis", "memory_caps", "memory_cost", "provider", "http")}
+    monkeypatch.setattr(main.settings, "llm_classifier_daily_call_cap", TEST_CAP)
+    monkeypatch.setattr(main.settings, "llm_model_classifier", MODEL)
 
     def _make(provider=None, redis=None, handler=None):
         main.app.state.provider = provider
@@ -90,9 +100,11 @@ def test_classify_returns_every_item_in_request_order(client):
     assert all(i["cached"] is False for i in out["items"])
     assert out["items"][0]["digest"] == cache.headline_digest("Headline 0", "https://x/0")
 
+    # Built from the configured host, not a literal: the twin hard-codes
+    # DATA_ENGINE_URL to data-engine-dev, which is the lock working.
+    base = main.settings.data_engine_url
     assert [s["url"] for s in seen] == [
-        "http://data-engine:8001/news/100/sentiment",
-        "http://data-engine:8001/news/101/sentiment",
+        f"{base}/news/100/sentiment", f"{base}/news/101/sentiment",
     ]
     assert set(seen[0]["json"]) == {"relevance", "sentiment", "category",
                                     "oneLine", "model", "classifiedAt"}
@@ -131,9 +143,9 @@ def test_cached_item_with_id_is_still_written_back(client):
     assert out["model"] is None and out["usage"] == {}
     assert out["writtenBack"] == 2, "a cache hit is still written back"
     assert len(seen) == 4
+    base = main.settings.data_engine_url
     assert [s["url"] for s in seen[2:]] == [
-        "http://data-engine:8001/news/100/sentiment",
-        "http://data-engine:8001/news/101/sentiment",
+        f"{base}/news/100/sentiment", f"{base}/news/101/sentiment",
     ]
 
 

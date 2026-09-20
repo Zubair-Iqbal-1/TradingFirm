@@ -203,7 +203,12 @@ services:
       dockerfile: Dockerfile
     container_name: tf-ai-agent
     ports:
-      - "8004:8004"
+      # Loopback only (Part 4.2, spec decision 17): POST /classify/headlines
+      # spends money and GET /usage reports spend, and a real OPENROUTER_API_KEY
+      # sits behind them. Other services reach this one by compose DNS
+      # (http://ai-agent:8004), which does not use the published port, so
+      # nothing in the stack notices. The host can still curl it.
+      - "127.0.0.1:8004:8004"
     depends_on:
       postgres:
         condition: service_healthy
@@ -214,9 +219,20 @@ services:
       SERVICE_PORT: "8004"
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-tf_user}:${DB_PASSWORD:?Set DB_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-tradingfirm}
       REDIS_URL: redis://redis:6379
-      LLM_PROVIDER: ${LLM_PROVIDER:-anthropic}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      GOOGLE_AI_API_KEY: ${GOOGLE_AI_API_KEY:-}
+      # One provider in code (decisions.md 2026-09-20): an OpenAI-compatible
+      # client pointed at OpenRouter. LLM_PROVIDER / ANTHROPIC_API_KEY /
+      # GOOGLE_AI_API_KEY were dropped here in Part 4.2 — Settings never read
+      # them. The key line lives in .env and is set by hand; empty is safe,
+      # the provider refuses before it builds a client.
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-anthropic/claude-sonnet-5}
+      LLM_MODEL_CLASSIFIER: ${LLM_MODEL_CLASSIFIER:-anthropic/claude-sonnet-5}
+      LLM_DAILY_CALL_CAP: ${LLM_DAILY_CALL_CAP:-100}
+      # The classifier's smaller cap, so a batch loop cannot eat the
+      # analyst's budget: ~14 calls a day expected, 40 is ~3x headroom, and
+      # 60 of the global 100 stay free for verdicts and the macro brief.
+      LLM_CLASSIFIER_DAILY_CALL_CAP: ${LLM_CLASSIFIER_DAILY_CALL_CAP:-40}
+      DATA_ENGINE_URL: http://data-engine:8001
     restart: unless-stopped
 
   # Dev/test twin of ai-agent (Part 4.1), the same shape Part 3.1 gave
@@ -229,9 +245,14 @@ services:
   #   OPENROUTER_API_KEY=""   → nothing on 8014 can reach an LLM
   #   LLM_DAILY_CALL_CAP="0"  → second lock: even a leaked key refuses
   #   LLM_BASE_URL=.invalid   → third lock: RFC 6761, it never resolves
+  #   LLM_CLASSIFIER_DAILY_CALL_CAP="0" → fourth lock (4.2): the classifier
+  #                                       refuses before the global cap does
   #   database tradingfirm_dev, Redis DB 1 → can never write prod's tables
   #                                          or prod's cache keys
-  # test_twin_never_calls_openrouter asserts all five. Never drop them.
+  #   DATA_ENGINE_URL=data-engine-dev → the classifier's write-back can never
+  #                                     reach prod's news_items (4.2)
+  # test_twin_never_calls_openrouter asserts the five LLM locks and
+  # test_twin_never_writes_prod_data_engine the last one. Never drop them.
   # No depends_on on purpose: tests mock Postgres/Redis and open no socket.
   ai-agent-dev:
     profiles: ["dev"]
@@ -252,6 +273,8 @@ services:
       OPENROUTER_API_KEY: ""                        # hard-coded empty: no LLM from the twin (4.1)
       LLM_DAILY_CALL_CAP: "0"                       # hard-coded 0: every call refused, key or not (4.1)
       LLM_BASE_URL: http://openrouter.invalid/api/v1  # hard-coded: .invalid never resolves (4.1)
+      LLM_CLASSIFIER_DAILY_CALL_CAP: "0"            # hard-coded 0: the classifier refuses too (4.2)
+      DATA_ENGINE_URL: http://data-engine-dev:8001  # hard-coded: never prod's news_items (4.2)
     command: uvicorn main:app --host 0.0.0.0 --port 8004 --reload
     restart: "no"
 
