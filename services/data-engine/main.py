@@ -15,6 +15,7 @@ FastAPI application with endpoints:
   GET  /market/status  — current market session
   POST /news/ingest    — store market news under _MARKET (risk-shield's poller, Part 3.5)
   GET  /news/market    — stored _MARKET news, newest first (risk-shield's macro inputs, Part 3.6a)
+  POST /news/{id}/sentiment — store one headline classification (ai-agent, Part 4.2)
   GET  /health         — health check
   GET  /               — service info
 
@@ -22,6 +23,7 @@ Port: 8001
 """
 
 import gc
+import json
 import logging
 import time as _time
 from contextlib import asynccontextmanager
@@ -283,6 +285,7 @@ async def root():
             "GET  /market/status",
             "POST /news/ingest",
             "GET  /news/market?hours=24&limit=50",
+            "POST /news/{id}/sentiment",
             "GET  /health",
         ],
     }
@@ -902,7 +905,110 @@ async def market_news(
         logger.warning(f"/news/market: database unavailable ({type(e).__name__})")
         raise HTTPException(status_code=503, detail=NEWS_DB_UNAVAILABLE_DETAIL) from None
     return [
-        {"publishedAt": row["published_at"].isoformat(), "source": row["source"],
-         "title": row["title"], "summary": row["summary"], "url": row["url"]}
+        {"id": row["id"],
+         "publishedAt": row["published_at"].isoformat(), "source": row["source"],
+         "title": row["title"], "summary": row["summary"], "url": row["url"],
+         "sentiment": _decode_sentiment(row["sentiment"])}
         for row in rows
     ]
+
+
+# ── Headline sentiment write-back (Part 4.2, spec decisions 8-10) ─
+# ai-agent's classifier owns the values; this route owns the contract. The
+# limits exist twice — NewsSentimentRequest here and classifier.ITEM_LIMITS
+# there — pinned by test_sentiment_contract_pinned_to_spec and
+# test_item_limits_pinned_to_spec. Change both or neither: a drift is a 422
+# on every write-back, and write-back is fail-open, so it would fail quietly.
+#
+# The column is replaced, not merged (decision 9): a re-classification is the
+# newer truth, and a merge would leave half an older verdict behind.
+
+SENTIMENT_RELEVANCE = ("high", "medium", "low")
+SENTIMENT_CATEGORIES = ("guidance", "analyst", "legal", "product", "macro", "insider", "other")
+SENTIMENT_ONE_LINE_MAX = 300
+SENTIMENT_MODEL_MAX = 100
+
+
+def _decode_sentiment(raw):
+    """jsonb arrives as text (no codec is registered). A row whose sentiment
+    will not parse reads as null rather than failing the whole list — the
+    same rule get_events uses for `meta`."""
+    if raw is None:
+        return None
+    if isinstance(raw, dict):
+        return raw
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        logger.warning("/news/market: unparseable sentiment on a row, returning null")
+        return None
+    return value if isinstance(value, dict) else None
+
+
+class NewsSentimentRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    relevance: str
+    sentiment: float = Field(ge=-1.0, le=1.0)
+    category: str
+    oneLine: str = Field(max_length=SENTIMENT_ONE_LINE_MAX)
+    model: str = Field(max_length=SENTIMENT_MODEL_MAX)
+    classifiedAt: AwareDatetime
+
+    @field_validator("relevance")
+    @classmethod
+    def _known_relevance(cls, value: str) -> str:
+        if value not in SENTIMENT_RELEVANCE:
+            raise ValueError(f"relevance must be one of {SENTIMENT_RELEVANCE}")
+        return value
+
+    @field_validator("category")
+    @classmethod
+    def _known_category(cls, value: str) -> str:
+        if value not in SENTIMENT_CATEGORIES:
+            raise ValueError(f"category must be one of {SENTIMENT_CATEGORIES}")
+        return value
+
+    @field_validator("oneLine", "model")
+    @classmethod
+    def _no_nul_not_blank(cls, value: str) -> str:
+        if "\x00" in value:
+            raise ValueError("NUL character not allowed")
+        if not value.strip():
+            raise ValueError("must not be blank")
+        return value
+
+
+@app.post("/news/{news_id}/sentiment")
+async def set_news_sentiment_route(news_id: int, body: NewsSentimentRequest):
+    """
+    Store one headline classification on news_items.sentiment (Part 4.2).
+
+    200 {id, updated: true}. 404 when no row has that id — the caller counts
+    it and carries on, because write-back is fail-open on its side. No pool,
+    or a database error or timeout, is a 503. Idempotent: a repeat write
+    replaces the value.
+    """
+    pool = getattr(app.state, "db_pool", None)
+    if pool is None:
+        raise HTTPException(status_code=503, detail=NEWS_DB_UNAVAILABLE_DETAIL)
+
+    from db import DB_ERRORS, set_news_sentiment
+
+    value = {
+        "relevance": body.relevance,
+        "sentiment": body.sentiment,
+        "category": body.category,
+        "oneLine": body.oneLine,
+        "model": body.model,
+        "classifiedAt": body.classifiedAt.isoformat(),
+    }
+    try:
+        updated = await set_news_sentiment(pool, news_id, value)
+    except (*DB_ERRORS, TimeoutError) as e:
+        logger.warning(f"/news/{news_id}/sentiment: database unavailable ({type(e).__name__})")
+        raise HTTPException(status_code=503, detail=NEWS_DB_UNAVAILABLE_DETAIL) from None
+    if not updated:
+        raise HTTPException(status_code=404, detail="news item not found")
+    logger.info(f"/news/{news_id}/sentiment: stored {body.relevance}/{body.category}")
+    return {"id": news_id, "updated": True}

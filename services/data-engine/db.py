@@ -283,11 +283,22 @@ async def upsert_news(pool: asyncpg.Pool, items: list[dict]) -> int:
 
 
 GET_MARKET_NEWS_SQL = """
-    SELECT published_at, source, title, summary, url
+    SELECT id, published_at, source, title, summary, url, sentiment
     FROM data_engine.news_items
     WHERE ticker = $1 AND published_at >= $2
     ORDER BY published_at DESC
     LIMIT $3
+"""
+
+# Part 4.2: the classifier's write-back target. The column is REPLACED, never
+# merged (spec 4.2 decision 9) — a re-classification is the newer truth, and
+# a merge would leave half of an older verdict behind. RETURNING id is what
+# tells the route 404 from 200 without a second round trip.
+SET_NEWS_SENTIMENT_SQL = """
+    UPDATE data_engine.news_items
+    SET sentiment = $2::jsonb
+    WHERE id = $1
+    RETURNING id
 """
 
 
@@ -300,6 +311,21 @@ async def get_market_news(pool: asyncpg.Pool, since: datetime, limit: int) -> li
     async with pool.acquire() as conn:
         rows = await conn.fetch(GET_MARKET_NEWS_SQL, MARKET_TICKER, since, limit)
     return [dict(row) for row in rows]
+
+
+async def set_news_sentiment(pool: asyncpg.Pool, news_id: int, sentiment: dict) -> bool:
+    """
+    Store one classification on data_engine.news_items.sentiment (Part 4.2).
+
+    True when a row was updated, False when `news_id` matches nothing — the
+    route turns that into a 404. One statement, one row: no transaction is
+    needed and there is no partial state to leave behind.
+    """
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            SET_NEWS_SENTIMENT_SQL, news_id, json.dumps(sentiment, default=str)
+        )
+    return row is not None
 
 
 async def upsert_events(pool: asyncpg.Pool, events: list[dict]) -> int:

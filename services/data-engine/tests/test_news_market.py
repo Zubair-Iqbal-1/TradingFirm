@@ -18,12 +18,22 @@ from fastapi.testclient import TestClient
 import db
 import main
 
+# `id` and `sentiment` joined the row in Part 4.2: ai-agent's classifier needs
+# an addressable row to write back to, and `sentiment` is what 4.4 filters on
+# (IS NULL = not yet classified). jsonb arrives as TEXT — no codec is
+# registered — so the second row carries the string form on purpose.
+SENTIMENT_JSON = ('{"relevance": "high", "sentiment": -0.4, "category": "guidance", '
+                  '"oneLine": "Guidance cut", "model": "anthropic/claude-sonnet-5", '
+                  '"classifiedAt": "2026-09-10T18:00:00+00:00"}')
+
 ROWS = [
-    {"published_at": datetime(2026, 9, 10, 17, 12, 29, tzinfo=timezone.utc), "source": "CNBC",
-     "title": "OpenAI targets work of Wall Street junior bankers", "summary": "A short summary.",
+    {"id": 41, "published_at": datetime(2026, 9, 10, 17, 12, 29, tzinfo=timezone.utc),
+     "source": "CNBC", "title": "OpenAI targets work of Wall Street junior bankers",
+     "summary": "A short summary.", "sentiment": None,
      "url": "https://www.cnbc.com/2026/09/10/openai-bankers.html"},
-    {"published_at": datetime(2026, 9, 10, 15, 55, tzinfo=timezone.utc), "source": None,
-     "title": "Oil surges 5%", "summary": None, "url": "https://www.reuters.com/markets/oil"},
+    {"id": 42, "published_at": datetime(2026, 9, 10, 15, 55, tzinfo=timezone.utc), "source": None,
+     "title": "Oil surges 5%", "summary": None, "sentiment": SENTIMENT_JSON,
+     "url": "https://www.reuters.com/markets/oil"},
 ]
 
 
@@ -82,12 +92,35 @@ def test_news_market_items_shape(client):
     resp = client(pool).get("/news/market")
     assert resp.status_code == 200
     assert resp.json() == [
-        {"publishedAt": "2026-09-10T17:12:29+00:00", "source": "CNBC",
+        {"id": 41, "publishedAt": "2026-09-10T17:12:29+00:00", "source": "CNBC",
          "title": "OpenAI targets work of Wall Street junior bankers", "summary": "A short summary.",
+         "sentiment": None,
          "url": "https://www.cnbc.com/2026/09/10/openai-bankers.html"},
-        {"publishedAt": "2026-09-10T15:55:00+00:00", "source": None, "title": "Oil surges 5%",
-         "summary": None, "url": "https://www.reuters.com/markets/oil"},
+        {"id": 42, "publishedAt": "2026-09-10T15:55:00+00:00", "source": None,
+         "title": "Oil surges 5%", "summary": None,
+         "sentiment": {"relevance": "high", "sentiment": -0.4, "category": "guidance",
+                       "oneLine": "Guidance cut", "model": "anthropic/claude-sonnet-5",
+                       "classifiedAt": "2026-09-10T18:00:00+00:00"},
+         "url": "https://www.reuters.com/markets/oil"},
     ]
+
+
+def test_news_market_selects_id_and_sentiment():
+    """Part 4.2: without these two columns nothing can address a row for
+    write-back, and 4.4 cannot tell a classified row from an unclassified
+    one."""
+    assert "SELECT id, published_at, source, title, summary, url, sentiment" in db.GET_MARKET_NEWS_SQL
+
+
+def test_news_market_unparseable_sentiment_reads_as_null(client):
+    """A malformed jsonb must not hide the headline it belongs to — the rule
+    get_events already uses for `meta`."""
+    rows = [dict(ROWS[0], sentiment="not json at all")]
+    pool, _ = _pool(rows)
+    resp = client(pool).get("/news/market")
+    assert resp.status_code == 200
+    assert resp.json()[0]["sentiment"] is None
+    assert resp.json()[0]["title"] == ROWS[0]["title"]
 
 
 @pytest.mark.parametrize("query, status", [
