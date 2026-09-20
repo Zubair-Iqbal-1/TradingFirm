@@ -766,3 +766,25 @@ The shared ×1.3–1.8 put 3.5's code above its band (1,119 vs ~770–1,060) and
 **Why:** found during the 2026-09-20 health check while diagnosing a stack that was down for an unrelated reason (host reboot, Docker Desktop `AutoStart` was false — now true). Recreating the symlink needs root and fixes nothing that is currently used; recording it costs nothing and stops the next investigation from chasing it. Revisit only if a tool is added that assumes the default context.
 
 **Supersedes:** nothing.
+
+---
+
+## 2026-09-20 — One OpenAI-compatible provider against OpenRouter, not the Anthropic SDK
+
+**Decision:** `services/ai-agent` talks to exactly one LLM client: `openai==3.16.2` with a configurable `base_url`, pointed at `https://openrouter.ai/api/v1`. One provider in code (`providers/openai_compat_provider.py`); there is no provider name to choose, so `LLM_PROVIDER` is not a setting. Models are env knobs: `LLM_MODEL` and `LLM_MODEL_CLASSIFIER` both default to `anthropic/claude-sonnet-5`, with `z-ai/glm-5.3-flash` and `z-ai/glm-5.3` kept as env-switch options for the Part 4.8 comparison, all reachable through the same key. The model id is OpenRouter's, not Anthropic's: `anthropic/claude-haiku-4.5` exists, `anthropic/claude-haiku-4-5` does not.
+
+Consequences recorded here because they are not obvious from the code: the `openai` SDK runs on **`httpx2`**, a different distribution from the `httpx==0.28.1` this repo pins, so **`respx` cannot intercept it** — provider tests inject an `httpx2.MockTransport` through the provider's `http_client` argument instead, and `respx` is deliberately absent from `services/ai-agent/requirements-dev.txt` (the only line where the three dev twins' pins differ). Adaptive thinking, `betas`, server-side refusal `fallbacks` and `cache_control` have no OpenAI-compatible equivalent and are dropped; reasoning effort goes in OpenRouter's `reasoning` object, per model, read from its own `GET /api/v1/models`. `usage: {"include": true}` is documented as deprecated and having no effect, so it is never sent — `usage.cost` arrives regardless.
+
+**Why:** cost and optionality. GLM-5.3-Flash is 22× cheaper on input and 33× cheaper on output than Claude Sonnet 5 (0.09/0.30 vs 2.00/10.00 USD per million tokens, measured from OpenRouter's models API on 2026-09-20) for the same verdict, and one OpenRouter key covers both sides of the 4.8 comparison without a second SDK, a second key or a second code path. Sonnet 5 stays the default until that comparison has run.
+
+**Supersedes:** D16 in `docs/plan-analyst-watcher.md` ("LLM: Anthropic `claude-opus-5` for verdicts, judgments and macro brief… Gemini fallback parked"). Plan files are read-only; this entry is the change. The rest of D16 stands: one strong model, an env knob for the classifier, no second provider built.
+
+---
+
+## 2026-09-20 — ai-agent's daily LLM call cap runs on the ET day, and a request that went out counts
+
+**Decision:** the cap key is `tf:ai:state:llm_calls:{YYYY-MM-DD}` with the date in **America/New_York**, TTL 36 h set with `EXPIRE <key> 129600 NX` so a later call in the same day cannot push the expiry forward (Redis ≥ 7.0; prod runs 7.4.11). The order is reserve-then-call: `INCR`, and only the over-cap check releases with `DECR`. A request that reached the wire counts against the day whatever it answered — a 429, a timeout and a refusal all count. Redis absent or raising falls back to an in-process counter with a WARNING, on both the reserve and the release path.
+
+**Why:** every other daily boundary in this repo is ET (risk-shield's sessions, 3.6b's brief slots); a UTC day would reset the cap at 20:00 ET, in the middle of after-hours. Counting failed calls is what keeps the cap a cap: release them and it becomes a retry budget, which is exactly the runaway a cap exists to stop. Failing open on Redis is the same bargain risk-shield's cooldowns already make — a Redis blip must not take the analyst down, and the process-local counter still bounds a loop.
+
+**Supersedes:** nothing.
