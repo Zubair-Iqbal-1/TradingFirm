@@ -44,7 +44,7 @@ pub/sub, never by writing into another service's tables.
 | `data-engine` | 8001 | **Functional** | Finviz screening → yfinance OHLCV → technical filters → enrichment. The only backend service with real logic. |
 | `signal-engine` | 8002 | Empty scaffold | Intended for entry/exit signal detection (zones, patterns). Only `/health` and `/` exist. |
 | `risk-shield` | 8003 | **Partial** | Market health scoring and regime detection (Phase 3). Part 3.1 gave it `config.py` / `db.py` / `cache.py`, a bounded fail-open lifespan and the `risk.macro_briefs` table; Part 3.2 added the two data fetchers (`monitors/quotes.py`, `monitors/fred.py`); Part 3.3 added the six regime monitors, the health score and the regime classifier (`scoring/`). Part 3.4 added the scheduler that runs them in market hours (prod only, `SCHEDULER_ENABLED`), writes `risk.health_checks` and publishes `tf:risk:health`, and `GET /market/health`, `/market/indicators`, `/market/history` beside `/health` and `/`. Part 3.5 added `GET /market/calendar` (a hand-maintained econ calendar file) and the market news poller (Finnhub general news every 15 min into data-engine's `POST /news/ingest`, prod only, `NEWS_POLL_ENABLED`). Part 3.6a added the macro brief's inputs: `GET /macro/brief/inputs` (health rows, data-engine's `GET /news/market`, the calendar, a FRED view with last-known and cadence freshness), the `MACRO_BRIEF_ENABLED` flag (off) and migration 006. The 3.4 follow-up moved both loops onto `wallclock.py` (sleeps of ≤ 60 s, a host-pause WARNING, `pausedSeconds` on the payload). Part 3.4b added night checks and the futures cap (`scoring/overlay.py`, `night_slots_for_day`, `run_night_check`), with `futures` and `overlay` on every `risk.health_checks` row, the payload and `/market/*`. Part 3.6b added macro brief generation behind `MACRO_BRIEF_ENABLED` (off in prod and the twin): slot, regime and manual briefs through ai-agent's `POST /brief/macro` contract, stored in `risk.macro_briefs` and served by `GET /macro/brief`; ai-agent implements the route in 4.6. Part 3.4c added the weekend-exposure signal: a `weekend` block (LOW / ELEVATED / HIGH with its reasons) on the last eight rows of a weekend-eve session, `GET /market/weekend/log` for judging the levels against the next session's opening move, and `PUT`/`DELETE /market/weekend/situation` — the service's only write routes, behind the `WEEKEND_WRITE_TOKEN` shared secret. |
-| `ai-agent` | 8004 | **Partial** | The LLM layer, no routes yet. Part 4.1 gave it `config.py`, `cache.py` (the `tf:ai:` namespace) and `providers/`: one OpenAI-compatible client pointed at OpenRouter through `LLM_BASE_URL`, with JSON-schema structured output, a per-model reasoning table, and a daily call cap plus a post-refusal cooldown in Redis, both checked before the request. `main.py` is still only `/health` and `/`; the prod service has no key, so it cannot reach an LLM. Routes come with 4.2 onward, `POST /brief/macro` with 4.6. |
+| `ai-agent` | 8004 (loopback only) | **Partial** | The LLM layer and the headline classifier. Part 4.1 gave it `config.py`, `cache.py` (the `tf:ai:` namespace) and `providers/`: one OpenAI-compatible client pointed at OpenRouter through `LLM_BASE_URL`, with JSON-schema structured output, a per-model reasoning table, and a daily call cap plus a post-refusal cooldown in Redis, both checked before the request. Part 4.2 added the service's first lifespan (Redis + one `httpx` client, bounded and fail-open, no DB pool), `POST /classify/headlines` (up to 30 headlines in one structured call, unseen ones only, written back to data-engine's `news_items.sentiment`), a second smaller daily cap for the classifier, and `GET /usage` for the running USD spend. The prod service publishes on `127.0.0.1` only, because those two routes spend and report money. It still has no key, so it cannot reach an LLM. `POST /brief/macro` comes with 4.6. |
 | `web` (dashboard) | 3000 | **Functional** | Next.js UI showing scan results, stock cards, market status. |
 
 ## The scanner pipeline (the core of the system)
@@ -106,7 +106,12 @@ FastAPI app. Key pieces:
   Accepted), `GET /scan/status`, `GET /scan/results`, `GET /scan/history`,
   `GET /stocks/{ticker}`, `POST /stock/{ticker}/refresh`, `GET /stock/{ticker}/bars`,
   `GET /indicators/{ticker}`, `GET /dossier/{ticker}`, `GET /market/status`,
-  `POST /news/ingest`, `GET /news/market`, `GET /health`.
+  `POST /news/ingest`, `GET /news/market`, `POST /news/{id}/sentiment`, `GET /health`.
+- **`POST /news/{id}/sentiment`** (4.2) — stores one headline classification
+  `{relevance, sentiment, category, oneLine, model, classifiedAt}` on
+  `news_items.sentiment`, replacing the column rather than merging it. 404 when
+  no row has that id, 422 outside the contract, 503 without a pool.
+  ai-agent's classifier is the only caller.
 - **`GET /news/market?hours=1..168&limit=1..100`** (3.6a, default 24 / 50) —
   stored `_MARKET` news, newest first, `[{publishedAt, source, title,
   summary, url}]`, Postgres only. `[]` when empty, 503 when the database is
@@ -505,7 +510,15 @@ Google-sign-in scaffolding under `web/lib/firebase/` has been removed.
   market health (see [`shared/constants.py`](../shared/constants.py)). One
   key prefix per service, all in DB 0 in prod: `tf:cache:` is data-engine's,
   `tf:risk:` risk-shield's, and `tf:ai:` ai-agent's (Part 4.1: the daily LLM
-  call counter on the ET day, and the provider cooldown).
+  call counter on the ET day, and the provider cooldown; Part 4.2: the
+  classifier's own day counter, the running cost totals for the ET day and
+  month, and `tf:ai:classify:{digest}` — one classification per headline,
+  7 days, keyed by `cache.headline_digest`).
+  **Redis is not durably persisted**: the service declares no volume, AOF is
+  off, and the image's anonymous `/data` volume with default RDB rules
+  survives a restart and a recreate but not a `docker compose down`. So the
+  cost totals and both caps are a floor, not an audit (`docs/decisions.md`
+  2026-09-20).
 - **OpenRouter** (`https://openrouter.ai/api/v1`, the `openai` SDK, Part
   4.1) — the one LLM gateway. OpenAI-compatible, so the client is
   `openai==3.16.2` with a configurable `base_url`; models are env knobs
@@ -549,7 +562,10 @@ Google-sign-in scaffolding under `web/lib/firebase/` has been removed.
   `LLM_DAILY_CALL_CAP=0` and `LLM_BASE_URL=http://openrouter.invalid/api/v1`.
   No `depends_on` and no `/migrations` mount: every test fakes Postgres and
   Redis, and 4.1 touches no migration. Phase 4 tests run there:
-  `docker exec tf-ai-agent-dev pytest tests/test_config.py tests/test_cache.py tests/test_openai_compat_provider.py -v`.
+  `docker exec tf-ai-agent-dev pytest tests/test_config.py tests/test_cache.py tests/test_openai_compat_provider.py tests/test_lifespan.py tests/test_usage_endpoint.py tests/test_prompts.py tests/test_data_engine_client.py tests/test_classifier.py tests/test_classify_endpoint.py -v`.
+  From 4.2 it hard-codes two more locks, `LLM_CLASSIFIER_DAILY_CALL_CAP=0` and
+  `DATA_ENGINE_URL=http://data-engine-dev:8001`, so a twin write-back can never
+  reach prod's `news_items` (`test_twin_never_writes_prod_data_engine`).
 - **CI: [`.github/workflows/tests.yml`](../.github/workflows/tests.yml)** —
   GitHub Actions on every push and pull request. One job per service
   (data-engine, risk-shield) builds the Dockerfile's `dev` stage and runs the

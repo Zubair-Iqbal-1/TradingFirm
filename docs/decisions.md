@@ -788,3 +788,69 @@ Consequences recorded here because they are not obvious from the code: the `open
 **Why:** every other daily boundary in this repo is ET (risk-shield's sessions, 3.6b's brief slots); a UTC day would reset the cap at 20:00 ET, in the middle of after-hours. Counting failed calls is what keeps the cap a cap: release them and it becomes a retry budget, which is exactly the runaway a cap exists to stop. Failing open on Redis is the same bargain risk-shield's cooldowns already make — a Redis blip must not take the analyst down, and the process-local counter still bounds a loop.
 
 **Supersedes:** nothing.
+
+---
+
+## 2026-09-20 — The classifier gets its own smaller cap, and a call is released on every pre-wire refusal
+
+**Decision:** `LLM_CLASSIFIER_DAILY_CALL_CAP` defaults to **40**, beside the global `LLM_DAILY_CALL_CAP` of 100, on the key `tf:ai:state:classifier_calls:{YYYY-MM-DD}` (ET, 36 h TTL, the same code path as the global counter through a keyword-only `name=`). The arithmetic: ~150–300 unique market headlines a day from risk-shield's 15-minute poller plus ~100 ticker headlines from analyst runs is **≤400 unique/day**, which at 30 per batch is **~14 calls**, so 40 is about 3× headroom and leaves **60 of the global 100** for verdicts, judgments and the macro brief. A classifier loop can therefore never take more than 40% of the day's budget.
+
+The reservation rule is stated once and obeyed in one place (`classifier._call_model`): **a call is counted from the moment the request is sent, and released on every refusal where no request reached the wire** — the classifier cap, a `validate_request` ValueError, `LLMNotConfigured` / `LLMAuthFailed` (raised before a client is built), `LLMCooledDown` and `LLMCapExceeded`. `LLMRateLimited` and every post-wire failure keep the reservation.
+
+**Why:** a batch loop and a single analyst call are not the same risk, and one cap cannot price both. On the release rule: 4.1's global counter releases only over-cap, which is right for it, but a classifier that reserved before checking the key would burn its whole day at the first refusal if a key were missing or wrong — 40 wasted reservations, no request sent, and the service silent until ET midnight. Counting only what reached the wire keeps the cap a cap without making a misconfiguration self-amplifying.
+
+**Supersedes:** nothing. It extends the 2026-09-20 cap entry above rather than replacing it.
+
+---
+
+## 2026-09-20 — Every classified headline with an id is written back, cached or fresh
+
+**Decision:** `POST /classify/headlines` writes `news_items.sentiment` through data-engine's new `POST /news/{id}/sentiment` for **every** item carrying an id, including ones served from the 7-day Redis digest cache. Write-back stays fail-open — a 404, 422, 5xx or timeout is counted in `writeBackErrors`, logged, and never fails the response.
+
+**Why:** fail-open write-back plus a 7-day cache plus write-back-on-fresh-only is a permanent hole. One write that 404s or times out leaves the row NULL while the digest keeps answering from cache, so Part 4.4's `sentiment IS NULL` filter re-submits that headline forever and never gets a result. Writing back on every call means **the next call heals the failed write**, which is the repair mechanism fail-open depends on; a cache hit costs no LLM call, so it is free.
+
+**Supersedes:** nothing. Plan row 4.2 said "writes back sentiment to `news_items`" without saying which items; this is the answer.
+
+---
+
+## 2026-09-20 — Known limitation: the headline digest does not detect cross-source duplicates
+
+**Decision:** `cache.headline_digest` keys on the article url (falling back to the title), so the same event reported by Reuters, CNBC and Bloomberg is three digests, three classifications and three payments. No near-duplicate matching is built in Part 4.2.
+
+**Why:** at this volume it is already inside the ≤400 unique headlines/day the cap is sized against, so it costs pennies, and near-duplicate matching is a real problem with real false positives that a classifier has no business solving. Where it actually bites is **Part 4.4**: the verdict prompt would read three near-identical headlines as three separate events and over-weight them. The fix belongs to **dossier assembly** — dedup by event at the point where the prompt is built, where the other event sources are already being merged.
+
+**Supersedes:** nothing.
+
+---
+
+## 2026-09-20 — No `ratelimit.py` in ai-agent yet, and prod ai-agent publishes on loopback only
+
+**Decision:** ai-agent gets no in-process sliding-window limiter in 4.2. One batch is **one** LLM call, the route is caller-driven rather than a loop, and the wire is already bounded by two daily caps plus the post-refusal cooldown; a third limiter would prevent no failure those three do not. It earns its place when an unattended loop calls the provider — the watcher, or 4.5's nightly scorer.
+
+Separately, the prod `ai-agent` compose block publishes **`127.0.0.1:8004:8004`** instead of `8004:8004`. `POST /classify/headlines` spends money and `GET /usage` reports spend, and a real `OPENROUTER_API_KEY` now sits behind them. Compose DNS does not use the published port, so other services are unaffected and the host can still curl it. Neither route carries a shared secret; loopback plus the compose network is the boundary, and an `X-TF-Token` in `WEEKEND_WRITE_TOKEN`'s shape is what to add if either route is ever called from off-host.
+
+**Why:** G10 — the simplest thing that bounds the spend. The port change is the cheap half of the same question: every other service in the stack still publishes on `0.0.0.0`, which is a separate housekeeping item, but the one service holding an LLM key should not wait for it.
+
+**Supersedes:** nothing.
+
+---
+
+## 2026-09-20 — Redis persistence is weak, so the cost totals and both caps are best-effort
+
+**Decision:** recorded, not fixed in 4.2. The `redis` compose service declares **no volume**; `/data` is an anonymous volume created by the image's own `VOLUME /data`. `appendonly` is `no` and `save` is the default `3600 1 300 100 60 10000`. So the RDB snapshot survives a container **restart** and a `docker compose up -d` **recreate**, but not a `docker compose down` (the next `up` attaches a fresh anonymous volume), and an unclean kill can lose up to **an hour** of counter increments.
+
+Three things lean on it: the month-to-date cost total, the 40-day daily history, and both daily caps. `GET /usage` is therefore a **floor, not an audit**, and a `down`/`up` cycle resets the day's caps.
+
+**Why:** it matters more from 4.2 onward because a real key sits behind those caps, and a cap that can be reset by a compose command is a weaker guarantee than it looks. The fix — a declared named volume `redisdata:/data` plus `--appendonly yes` — is a prod change that needs its own go, and it belongs with the other published-port cleanup in the housekeeping batch rather than inside a part that is already touching a shared compose file.
+
+**Supersedes:** nothing.
+
+---
+
+## 2026-09-20 — The classifier's output is camelCase (`oneLine`), correcting plan row 4.2
+
+**Decision:** the classification schema is `{relevance, sentiment, category, oneLine}`, not `one_line` as plan row 4.2 wrote it. Stored under the same names in `news_items.sentiment`.
+
+**Why:** every payload in this repo is camelCase (`CLAUDE.md` conventions, `scanners/models.py` aliases every field), and the value is written straight to a JSONB column that 4.4 reads back — a single snake_case key there would be the only one in the schema.
+
+**Supersedes:** the field name in plan row 4.2. Plan files are read-only; this entry is the change.
