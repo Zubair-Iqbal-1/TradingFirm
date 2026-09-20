@@ -1,0 +1,16 @@
+# Dev/test-only dependencies. Not installed in the prod image (Dockerfile
+# stage `dev` installs these; stage `prod` does not).
+#
+# Pins match services/risk-shield/requirements-dev.txt with ONE deliberate
+# difference: respx is absent. The openai SDK runs on httpx2, and respx —
+# 0.22.0 and 0.23.1 alike — requires and patches httpx 0.2x, so it would
+# install cleanly and intercept nothing. Provider tests use
+# httpx2.MockTransport instead (spec 4.1 decision 7). Do not add respx back.
+#
+# Run tests inside tf-ai-agent-dev, not on the host:
+#   docker compose --profile dev up -d ai-agent-dev
+#   docker exec tf-ai-agent-dev pytest tests/test_config.py -v
+-r requirements.txt
+pytest==9.1.1
+pytest-asyncio==1.4.0
+pytest-cov==7.1.0
