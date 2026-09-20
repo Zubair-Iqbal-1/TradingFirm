@@ -1,10 +1,11 @@
-# Unit tests for data-engine and risk-shield (spec docs/specs/ci-coverage.md).
+# Unit tests for data-engine, risk-shield and ai-agent (spec
+# docs/specs/ci-coverage.md; the ai-agent suite comes from docs/specs/4.1.md).
 #
 # Each suite runs in its service's Dockerfile `dev` stage, the same image as
 # the compose dev twin, with the source and infra/supabase/migrations mounted
 # the way docker-compose.yml mounts them. No Postgres or Redis: every test
 # fakes them. `--network none`, so an unmocked call fails instead of reaching
-# yfinance, Finviz, FRED, Finnhub or EDGAR (G6/G7).
+# yfinance, Finviz, FRED, Finnhub, EDGAR or OpenRouter (G6/G7).
 #
 # Never add here: secrets or API keys, docker compose (prod or dev), or the
 # live scripts in tests/ (*_live.py, full_scan_test.py, record_*, smoke_*,
@@ -106,6 +107,24 @@ jobs:
               tests/test_weekend_gate.py
               tests/test_weekend_row.py
               tests/test_weekend_log.py
+          - service: ai-agent
+            # Twin env from docker-compose.yml (ai-agent-dev). The guard test
+            # (test_twin_never_calls_openrouter) skips without SERVICE_NAME and
+            # asserts these overrides, so they must match compose. The three
+            # locks that keep this suite off a live LLM: an empty key, a zero
+            # daily cap, and an .invalid base URL (Part 4.1).
+            env: >-
+              -e SERVICE_NAME=ai-agent-dev
+              -e SERVICE_PORT=8004
+              -e OPENROUTER_API_KEY=
+              -e LLM_DAILY_CALL_CAP=0
+              -e LLM_BASE_URL=http://openrouter.invalid/api/v1
+              -e DATABASE_URL=postgresql+asyncpg://ci:ci@postgres:5432/tradingfirm_dev
+              -e REDIS_URL=redis://redis:6379/1
+            tests: >-
+              tests/test_config.py
+              tests/test_cache.py
+              tests/test_openai_compat_provider.py
 
     steps:
       - uses: actions/checkout@v5
