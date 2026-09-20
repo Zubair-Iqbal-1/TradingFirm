@@ -756,3 +756,13 @@ The shared ×1.3–1.8 put 3.5's code above its band (1,119 vs ~770–1,060) and
 **Why:** the first production night check (2026-09-14 20:45 UTC) could not be reviewed from the log alone; only the check's own summary line and the stored row existed.
 
 **Supersedes:** N/A — it extends the 2026-09-10 entry's 6.0 list, which is append-only.
+
+---
+
+## 2026-09-20 — `/var/run/docker.sock` points at a home directory that does not exist: leave it
+
+**Decision:** the host symlink `/var/run/docker.sock -> /Users/zubair/.docker/run/docker.sock` names **`zubair`**, not this machine's user `zubairai`, so the `default` docker context can never connect. Known and deliberately left alone. The active context is `desktop-linux`, whose endpoint `unix:///Users/zubairai/.docker/run/docker.sock` is correct, and Docker Desktop ships with `EnableDefaultDockerSocket: false`, so nothing in this repo reaches for the broken path.
+
+**Why:** found during the 2026-09-20 health check while diagnosing a stack that was down for an unrelated reason (host reboot, Docker Desktop `AutoStart` was false — now true). Recreating the symlink needs root and fixes nothing that is currently used; recording it costs nothing and stops the next investigation from chasing it. Revisit only if a tool is added that assumes the default context.
+
+**Supersedes:** nothing.
