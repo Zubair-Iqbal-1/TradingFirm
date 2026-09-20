@@ -219,6 +219,42 @@ services:
       GOOGLE_AI_API_KEY: ${GOOGLE_AI_API_KEY:-}
     restart: unless-stopped
 
+  # Dev/test twin of ai-agent (Part 4.1), the same shape Part 3.1 gave
+  # risk-shield and Part 0.7 gave data-engine, for the same reason: the prod
+  # image carries no test deps and the host Python is not the pinned set.
+  # Opt-in — not started by a plain `docker compose up -d`; use
+  # `docker compose --profile dev up -d ai-agent-dev`. Runs the Dockerfile's
+  # `dev` stage: dev deps baked in, NO application code, so the image is
+  # inert without the source mount below. Hard-coded, not from .env:
+  #   OPENROUTER_API_KEY=""   → nothing on 8014 can reach an LLM
+  #   LLM_DAILY_CALL_CAP="0"  → second lock: even a leaked key refuses
+  #   LLM_BASE_URL=.invalid   → third lock: RFC 6761, it never resolves
+  #   database tradingfirm_dev, Redis DB 1 → can never write prod's tables
+  #                                          or prod's cache keys
+  # test_twin_never_calls_openrouter asserts all five. Never drop them.
+  # No depends_on on purpose: tests mock Postgres/Redis and open no socket.
+  ai-agent-dev:
+    profiles: ["dev"]
+    build:
+      context: ./services/ai-agent
+      dockerfile: Dockerfile
+      target: dev
+    container_name: tf-ai-agent-dev
+    ports:
+      - "8014:8004"
+    volumes:
+      - ./services/ai-agent:/app
+    environment:
+      SERVICE_NAME: ai-agent-dev
+      SERVICE_PORT: "8004"
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-tf_user}:${DB_PASSWORD:?Set DB_PASSWORD in .env}@postgres:5432/tradingfirm_dev
+      REDIS_URL: redis://redis:6379/1
+      OPENROUTER_API_KEY: ""                        # hard-coded empty: no LLM from the twin (4.1)
+      LLM_DAILY_CALL_CAP: "0"                       # hard-coded 0: every call refused, key or not (4.1)
+      LLM_BASE_URL: http://openrouter.invalid/api/v1  # hard-coded: .invalid never resolves (4.1)
+    command: uvicorn main:app --host 0.0.0.0 --port 8004 --reload
+    restart: "no"
+
   # ── FRONTEND ──
 
   web:
