@@ -26,12 +26,28 @@ import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
+from typing import Optional
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator
 
 import cache
+import classifier
 import config
+import data_engine_client
+import prompts
 from config import settings
+from providers.base import (
+    LLMBadResponse,
+    LLMCapExceeded,
+    LLMCooledDown,
+    LLMNotConfigured,
+    LLMRateLimited,
+    LLMRefused,
+    LLMRejected,
+    LLMUnavailable,
+)
 
 SERVICE_NAME = os.getenv("SERVICE_NAME", "ai-agent")
 SERVICE_PORT = int(os.getenv("SERVICE_PORT", "8004"))
@@ -227,4 +243,128 @@ async def usage():
             "secondsLeft": seconds_left,
             "cause": cause,
         },
+    }
+
+
+# ── Headline classification (Part 4.2) ───────────────────────────
+
+
+class HeadlineItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    title: str = Field(max_length=classifier.TITLE_MAX)
+    id: Optional[int] = None
+    url: Optional[str] = Field(default=None, max_length=2048)
+    source: Optional[str] = Field(default=None, max_length=100)
+    publishedAt: Optional[AwareDatetime] = None
+    summary: Optional[str] = Field(default=None, max_length=10000)
+    ticker: Optional[str] = Field(default=None, max_length=10)
+
+    @field_validator("title")
+    @classmethod
+    def _title_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("title is blank")
+        if "\x00" in value:
+            raise ValueError("NUL character not allowed")
+        return value
+
+
+class ClassifyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[HeadlineItem] = Field(min_length=1, max_length=classifier.BATCH_MAX)
+    writeBack: bool = True
+
+
+@app.post("/classify/headlines")
+async def classify_headlines(body: ClassifyRequest):
+    """
+    Classify up to 30 headlines in one LLM call (Part 4.2).
+
+    Anything already classified inside the 7-day digest window is served from
+    Redis and never sent. Every item carrying an `id` is written back to
+    data-engine — cached or freshly classified (spec decision 6b), because
+    that is what stops a fail-open write-back from leaving a row NULL
+    forever.
+
+    429 — either cap, the cooldown, or this call's own 429.
+    502 — the model answered, but the answer is unusable.
+    503 — no key, or the gateway could not be reached.
+    500 — our prompt, schema or label is wrong. Never the caller's fault:
+          a bad body is a 422 from the model above, before anything is
+          reserved.
+    """
+    headlines = [item.model_dump() for item in body.items]
+    for headline in headlines:
+        if headline.get("publishedAt") is not None:
+            headline["publishedAt"] = headline["publishedAt"].isoformat()
+
+    provider = getattr(app.state, "provider", None)
+    if provider is None:
+        raise HTTPException(status_code=503, detail="provider unavailable")
+
+    redis = getattr(app.state, "redis", None)
+    caps = getattr(app.state, "memory_caps", None) or {}
+    memory_cap = caps.get(cache.STATE_CLASSIFIER_CALLS) or cache.MemoryCap()
+    memory_cost = getattr(app.state, "memory_cost", None) or cache.MemoryCost()
+
+    try:
+        results, result = await classifier.classify(
+            provider, redis, memory_cap, memory_cost, headlines,
+            model=settings.llm_model_classifier,
+            cap=settings.llm_classifier_daily_call_cap,
+        )
+    except (LLMCapExceeded, LLMCooledDown, LLMRateLimited) as e:
+        logger.warning(f"/classify/headlines refused: {type(e).__name__}")
+        raise HTTPException(status_code=429, detail=str(e)) from None
+    except LLMNotConfigured as e:
+        # LLMAuthFailed is a subclass: a bad key and no key fail the same way.
+        logger.warning(f"/classify/headlines: {type(e).__name__}")
+        raise HTTPException(status_code=503, detail=str(e)) from None
+    except LLMUnavailable as e:
+        logger.warning(f"/classify/headlines: gateway unavailable ({e})")
+        raise HTTPException(status_code=503, detail=str(e)) from None
+    except (LLMRejected, LLMRefused, LLMBadResponse, classifier.BatchRejected) as e:
+        logger.error(f"/classify/headlines: unusable answer ({type(e).__name__}: {e})")
+        raise HTTPException(status_code=502, detail=f"{type(e).__name__}: {e}") from None
+    except (prompts.PromptMissing, ValueError) as e:
+        # Our own request is wrong — the classifier builds it, not the caller.
+        logger.error(f"/classify/headlines: bad request built by this service ({e})")
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}") from None
+
+    written, errors = 0, 0
+    if body.writeBack:
+        http = getattr(app.state, "http", None)
+        for item, classification in zip(body.items, results):
+            if item.id is None:
+                continue
+            payload = {k: v for k, v in classification.items() if k != "cached"}
+            outcome = await data_engine_client.write_sentiment(
+                http, settings.data_engine_url, item.id, payload
+            )
+            written += 1 if outcome.ok else 0
+            errors += 0 if outcome.ok else 1
+
+    cached_count = sum(1 for c in results if c["cached"])
+    return {
+        "count": len(results),
+        "cached": cached_count,
+        "classified": len(results) - cached_count,
+        "writtenBack": written,
+        "writeBackErrors": errors,
+        "model": result.model if result is not None else None,
+        "usage": result.usage if result is not None else {},
+        "items": [
+            {
+                "id": item.id,
+                "digest": cache.headline_digest(item.title, item.url),
+                "relevance": c["relevance"],
+                "sentiment": c["sentiment"],
+                "category": c["category"],
+                "oneLine": c["oneLine"],
+                "cached": c["cached"],
+            }
+            for item, c in zip(body.items, results)
+        ],
     }
