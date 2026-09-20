@@ -1,0 +1,111 @@
+"""
+TradingFirm — AI Agent Configuration (Part 4.1)
+
+Loads settings from environment variables with sensible defaults. Mirrors
+services/risk-shield/config.py in shape; the two services share no Python
+package, so this is a copied pattern, not imported code.
+
+One provider in code (decisions.md 2026-09-20, supersedes D16): an
+OpenAI-compatible client with a configurable base_url, pointed at
+OpenRouter. Models are env knobs, so Anthropic and Z.ai ids are reachable
+through the same key.
+"""
+
+from pydantic import AliasChoices, Field, SecretStr
+from pydantic_settings import BaseSettings
+
+# Hard bound on any single dependency connection attempt at startup, in
+# seconds — risk-shield's STARTUP_TIMEOUT, same reasoning (redis-py's own
+# socket timeout is unbounded). 4.1 builds no lifespan; cache.create_redis
+# reads this at call time, never via a from-import, so a test can move it.
+STARTUP_TIMEOUT = 5.0
+
+# Ceiling on any cooldown this service will honour, in seconds. A hostile or
+# confused `retry-after` cannot park the analyst for a day.
+LLM_COOLDOWN_MAX = 3600
+
+# Cooldown after 401 / 402 / 403. An hour, because none of the three clears
+# on its own: the key is wrong, or the account is out of credits.
+LLM_COOLDOWN_AUTH = 3600
+
+
+class Settings(BaseSettings):
+    """AI Agent service configuration."""
+
+    # Service identity
+    service_name: str = "ai-agent"
+    service_port: int = 8004
+
+    # Database (asyncpg). Nothing in 4.1 opens it; 4.2 builds the pool.
+    database_url: str = "postgresql+asyncpg://tf_user:tradingfirm_dev_2026@postgres:5432/tradingfirm"
+
+    # Redis
+    redis_url: str = "redis://redis:6379"
+
+    # The one knob that moves this service to another OpenAI-compatible
+    # gateway. The dev twin points it at an .invalid host (RFC 6761).
+    llm_base_url: str = "https://openrouter.ai/api/v1"
+
+    # OpenRouter key. SecretStr like risk-shield's FRED and Finnhub keys, so
+    # repr()/str() mask it by construction and a leak needs a deliberate
+    # .get_secret_value() rather than a forgotten f-string (G14). Empty = the
+    # provider raises before any HTTP and before a client is built. The dev
+    # twin is always empty.
+    # AliasChoices, not a bare alias: pydantic-settings resolves the init
+    # source through the alias too, so a bare validation_alias would make
+    # Settings(llm_api_key=...) silently do nothing — which is how every test
+    # builds a configured settings object.
+    llm_api_key: SecretStr = Field(
+        default=SecretStr(""),
+        validation_alias=AliasChoices("OPENROUTER_API_KEY", "llm_api_key"),
+    )
+
+    # Verdicts, judgments, macro brief. Sonnet 5 for now; the GLM ids in
+    # providers.openai_compat_provider.MODEL_REASONING are the env-switch
+    # options for the 4.8 comparison.
+    llm_model: str = "anthropic/claude-sonnet-5"
+
+    # Headline classification (4.2). Same default, its own knob.
+    llm_model_classifier: str = "anthropic/claude-sonnet-5"
+
+    # Hard bound on calls *made* per ET day. 0 = every call refused, which is
+    # how the dev twin is nailed shut without relying on the empty key alone.
+    llm_daily_call_cap: int = 100
+
+    # Non-streaming output budget. At reasoning effort "low" roughly a fifth
+    # goes to reasoning and the rest to the JSON answer.
+    llm_max_tokens: int = 8000
+
+    # Seconds, hard, per call. risk-shield's BRIEF_TIMEOUT is 180 s, so
+    # ai-agent must give up first or its caller times out on a live call.
+    llm_timeout: float = 150.0
+
+    # Cooldown after a 429 with no usable retry-after. Matches every other
+    # source cooldown in the repo.
+    llm_cooldown_seconds: int = 900
+
+    # OpenRouter app attribution. Sent as HTTP-Referer / X-Title only when
+    # non-empty; never a hard-coded value.
+    llm_referer: str = ""
+    llm_title: str = ""
+
+    # Debug mode
+    debug: bool = False
+
+    # LLM_PROVIDER / ANTHROPIC_API_KEY / GOOGLE_AI_API_KEY are still set on
+    # the prod compose block and are ignored here: one provider in code.
+    model_config = {"env_file": ".env", "extra": "ignore"}
+
+    @property
+    def asyncpg_url(self) -> str:
+        """Strip +asyncpg from SQLAlchemy-style URL for raw asyncpg."""
+        return self.database_url.replace("+asyncpg", "")
+
+    @property
+    def llm_configured(self) -> bool:
+        """Whether an OpenRouter key is present. The only thing anything asks
+        of the key — the value itself never reaches a response or a log."""
+        return bool(self.llm_api_key.get_secret_value())
+
+
+settings = Settings()
