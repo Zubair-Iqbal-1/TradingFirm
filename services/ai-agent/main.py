@@ -13,6 +13,8 @@ Endpoints:
                               counts, readable without logging into OpenRouter
   POST /classify/headlines  — classify up to 30 headlines in one call and
                               write each result back to data-engine (Part 4.2)
+  POST /analyze/{ticker}    — the analyst verdict + plan for one ticker,
+                              stored in ai.verdicts (Part 4.4)
 
 Port: 8004. The prod service publishes it on 127.0.0.1 only (spec 4.2
 decision 17): /classify/headlines spends money and /usage reports spend, so
@@ -28,10 +30,11 @@ from datetime import datetime, timezone
 
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator
 
+import analyst
 import cache
 import classifier
 import config
@@ -212,6 +215,7 @@ async def root():
         "endpoints": [
             "GET  /usage",
             "POST /classify/headlines",
+            "POST /analyze/{ticker}",
         ],
     }
 
@@ -417,3 +421,30 @@ async def classify_headlines(body: ClassifyRequest):
             for item, c in zip(body.items, results)
         ],
     }
+
+
+# ── The analyst verdict (Part 4.4) ───────────────────────────────
+
+
+@app.post("/analyze/{ticker}")
+async def analyze_ticker(
+    ticker: str,
+    horizon: str = Query("swing"),
+    entry: Optional[float] = Query(None),
+    fresh: bool = Query(False),
+):
+    """
+    A verdict and a trade plan for one ticker (Part 4.4). Loopback only, like
+    every route here. Spends at most one classifier call and one verdict
+    call; a repeat with unchanged inputs is served from the per-ticker cache
+    and spends neither. `entry` omitted = the dossier's last daily close.
+
+    404 — no bars stored for the ticker.       409 — settings missing, or the
+    422 — bad ticker, horizon or entry.               same analysis is running.
+    429 — a cap, the cooldown, or a 429.        502 — unusable dossier or answer.
+    503 — no database, data-engine or gateway.
+    """
+    try:
+        return await analyst.run(app.state, settings, ticker, horizon, entry, fresh)
+    except analyst.AnalyzeError as e:
+        raise HTTPException(status_code=e.status, detail=e.detail) from None
