@@ -23,6 +23,7 @@ PROMPT_DIR = Path(__file__).resolve().parent
 _CACHE: dict[str, str] = {}
 
 HEADLINE_CLASSIFY = "headline_classify"
+VERDICT = "verdict"                      # Part 4.4
 
 
 class PromptMissing(Exception):
