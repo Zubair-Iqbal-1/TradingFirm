@@ -293,3 +293,23 @@ async def insert_outcomes(pool: asyncpg.Pool, rows: list[dict]) -> int:
                 )
                 inserted += _inserted(status)
     return inserted
+
+
+# One row per verdict × outcome (or one per verdict with none), for
+# GET /journal/stats. Read-only.
+JOURNAL_ROWS_SQL = """
+SELECT v.id, v.model, v.verdict, v.confidence, v.asked_at,
+       (v.plan_proposed IS NOT NULL) AS has_plan,
+       o.horizon_days, o.return_pct, o.stop_hit, o.target_hit, o.first_hit,
+       o.r_multiple, o.session_date
+FROM ai.verdicts v
+LEFT JOIN ai.verdict_outcomes o ON o.verdict_id = v.id
+WHERE v.user_id = $1::uuid AND v.asked_at >= $2
+ORDER BY v.asked_at ASC, v.id ASC, o.horizon_days ASC
+"""
+
+
+async def journal_rows(pool: asyncpg.Pool, user_id: str, since) -> list[dict]:
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(JOURNAL_ROWS_SQL, user_id, since)
+    return [{**dict(r), "id": str(r["id"])} for r in rows]

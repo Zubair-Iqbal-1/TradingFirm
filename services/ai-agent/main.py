@@ -15,6 +15,8 @@ Endpoints:
                               write each result back to data-engine (Part 4.2)
   POST /analyze/{ticker}    — the analyst verdict + plan for one ticker,
                               stored in ai.verdicts (Part 4.4)
+  GET  /journal/stats       — how the stored verdicts did at +1/+5/+20
+                              sessions, per model (Part 4.5)
 
 Port: 8004. The prod service publishes it on 127.0.0.1 only (spec 4.2
 decision 17): /classify/headlines spends money and /usage reports spend, so
@@ -26,7 +28,7 @@ import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from typing import Optional
 
@@ -43,6 +45,7 @@ import ledger
 import prompts
 from config import settings
 from journal import runner as journal_runner
+from journal import stats as journal_stats
 from providers.base import (
     LLMBadResponse,
     LLMCapExceeded,
@@ -240,6 +243,7 @@ async def root():
             "GET  /usage",
             "POST /classify/headlines",
             "POST /analyze/{ticker}",
+            "GET  /journal/stats",
         ],
     }
 
@@ -472,3 +476,29 @@ async def analyze_ticker(
         return await analyst.run(app.state, settings, ticker, horizon, entry, fresh)
     except analyst.AnalyzeError as e:
         raise HTTPException(status_code=e.status, detail=e.detail) from None
+
+
+# ── The journal (Part 4.5) ───────────────────────────────────────
+
+
+@app.get("/journal/stats")
+async def get_journal_stats(days: int = Query(90, ge=1, le=365)):
+    """
+    How the stored verdicts did (Part 4.5): per model × verdict × horizon,
+    hit rate, mean / median return, stop / target rates and avg R over the
+    rows with a plan, and per-model confidence calibration. Verdicts asked in
+    the last `days` days. Read-only. Loopback only: the port is published on
+    127.0.0.1, like every route here.
+
+    422 — `days` not an integer 1–365.   503 — no database, or the read failed.
+    """
+    pool = getattr(app.state, "db_pool", None)
+    if pool is None:
+        raise HTTPException(status_code=503, detail="database unavailable")
+    now = datetime.now(timezone.utc)
+    try:
+        rows = await db.journal_rows(pool, db.DEV_USER_ID, now - timedelta(days=days))
+    except db.DB_FAILURES as e:
+        logger.error(f"/journal/stats: read failed ({type(e).__name__})")
+        raise HTTPException(status_code=503, detail="database unavailable") from None
+    return journal_stats.compute(rows, now, days)
