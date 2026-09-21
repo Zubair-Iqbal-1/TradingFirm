@@ -1,5 +1,6 @@
 """
-TradingFirm — /analyze's two upstream reads (Part 4.4).
+TradingFirm — ai-agent's upstream reads: /analyze's two (Part 4.4) and the
+journal scorer's refresh + bars reads on data-engine (Part 4.5, at the end).
 
 data-engine's dossier is the verdict's subject, so it fails CLOSED: without
 it nothing is spent. risk-shield's regime and macro brief are context, so
@@ -11,6 +12,7 @@ never a body or a URL.
 """
 
 import logging
+from datetime import datetime
 from typing import Optional
 
 import httpx
@@ -123,3 +125,107 @@ async def fetch_macro(http: httpx.AsyncClient, base_url: str, timeout: float) ->
     elif status not in (None, 404):
         logger.warning(f"risk-shield /macro/brief: HTTP {status}")
     return out
+
+
+# ── The journal's reads (Part 4.5) ───────────────────────────────
+#
+# The scorer asks data-engine to refresh a ticker, then reads the stored bars
+# back. The refresh answer is sorted into four kinds (spec 4.5 decisions 2
+# and 11), because data-engine's statuses do not say everything:
+#   ok        200 with daily AND hourly bars: written just now
+#   blank     200 with zero daily or hourly bars. yfinance 1.5.1 answers a
+#             delisted symbol and a rate limit the same way (F2), so a
+#             blank is ambiguous; the runner's two-blank rule decides
+#   cooldown  429 WITH Retry-After: data-engine's 15 min refresh cooldown.
+#             It proves a completed refresh, not a stored bar (F1): never
+#             fresh, requeued once
+#   stop      anything else — 429 without Retry-After (the provider's rate
+#             limit), 5xx, timeout, connect error, a body that is not the
+#             refresh shape. The night stops.
+# data-engine pins the Retry-After difference:
+# test_refresh_429s_distinguishable_for_ai_agent.
+
+REFRESH_OK, REFRESH_BLANK, REFRESH_COOLDOWN, REFRESH_STOP = "ok", "blank", "cooldown", "stop"
+
+
+class RefreshAnswer:
+    __slots__ = ("kind", "detail", "daily", "hourly")
+
+    def __init__(self, kind: str, detail: str, daily: int = 0, hourly: int = 0):
+        self.kind, self.detail, self.daily, self.hourly = kind, detail, daily, hourly
+
+    def __repr__(self) -> str:
+        return f"RefreshAnswer({self.kind}, {self.detail})"
+
+
+def _count(body, key) -> Optional[int]:
+    value = body.get(key) if isinstance(body, dict) else None
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
+async def refresh_ticker(http: httpx.AsyncClient, base_url: str, ticker: str,
+                         timeout: float) -> RefreshAnswer:
+    """POST /stock/{t}/refresh on data-engine, sorted into a kind. Never raises
+    for anything data-engine or the network does."""
+    ticker = validate_ticker(ticker)
+    url = f"{base_url.rstrip('/')}/stock/{ticker}/refresh"
+    try:
+        resp = await http.post(url, timeout=timeout)
+    except httpx.HTTPError as e:
+        return RefreshAnswer(REFRESH_STOP, f"data-engine: {type(e).__name__}")
+    if resp.status_code == 429:
+        if resp.headers.get("Retry-After"):
+            return RefreshAnswer(REFRESH_COOLDOWN, "refresh cooldown")
+        return RefreshAnswer(REFRESH_STOP, "data-engine: HTTP 429 (provider rate limit)")
+    if resp.status_code != 200:
+        return RefreshAnswer(REFRESH_STOP, f"data-engine: HTTP {resp.status_code}")
+    try:
+        body = resp.json()
+    except ValueError:
+        return RefreshAnswer(REFRESH_STOP, "data-engine: refresh body is not JSON")
+    daily, hourly = _count(body, "dailyBars"), _count(body, "hourlyBars")
+    if daily is None or hourly is None:
+        return RefreshAnswer(REFRESH_STOP, "data-engine: not a refresh answer")
+    if daily == 0 or hourly == 0:
+        return RefreshAnswer(REFRESH_BLANK, f"blank refresh (daily {daily}, hourly {hourly})",
+                             daily, hourly)
+    return RefreshAnswer(REFRESH_OK, "refreshed", daily, hourly)
+
+
+class BarsUnavailable(Exception):
+    """A bars read that did not produce a list of bars."""
+
+
+BAR_KEYS = ("ts", "open", "high", "low", "close")
+
+
+async def fetch_bars(http: httpx.AsyncClient, base_url: str, ticker: str,
+                     interval: str, since: datetime, timeout: float) -> list[dict]:
+    """GET /stock/{t}/bars — DB-only on data-engine, never the provider.
+    404 (no bars at all) and every other failure are BarsUnavailable."""
+    ticker = validate_ticker(ticker)
+    if interval not in ("1d", "1h"):
+        raise ValueError("interval must be '1d' or '1h'")
+    if since.tzinfo is None:
+        raise ValueError("since must be timezone-aware")
+    url = f"{base_url.rstrip('/')}/stock/{ticker}/bars"
+    try:
+        resp = await http.get(url, params={"interval": interval, "since": since.isoformat()},
+                              timeout=timeout)
+    except httpx.HTTPError as e:
+        raise BarsUnavailable(f"data-engine: {type(e).__name__}") from None
+    if resp.status_code != 200:
+        raise BarsUnavailable(f"data-engine: HTTP {resp.status_code}")
+    try:
+        body = resp.json()
+    except ValueError:
+        raise BarsUnavailable("data-engine: bars body is not JSON") from None
+    bars = body.get("bars") if isinstance(body, dict) else None
+    if not isinstance(bars, list) or body.get("ticker") != ticker or body.get("interval") != interval:
+        raise BarsUnavailable("data-engine: not a bars answer for this ticker")
+    for b in bars:
+        if not isinstance(b, dict) or not isinstance(b.get("ts"), str) or any(
+                isinstance(b.get(k), bool) or not isinstance(b.get(k), (int, float))
+                for k in BAR_KEYS[1:]):
+            raise BarsUnavailable("data-engine: a bar without ts / open / high / low / close")
+    return bars

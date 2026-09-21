@@ -139,3 +139,47 @@ async def test_create_db_pool_is_bounded_and_never_logs_credentials(monkeypatch,
 
 def test_get_verdict_unparseable_json_reads_as_none():
     assert db._decode("{not json") is None and db._decode(None) is None
+
+
+# ── Part 4.5: the journal's queries ──────────────────────────────
+
+@pytest.mark.asyncio
+async def test_due_verdicts_query_and_decoding():
+    since = datetime(2026, 7, 23, tzinfo=timezone.utc)
+    row = {"id": "11111111-1111-4111-8111-111111111111", "ticker": "AAPL", "asked_at": NOW,
+           "entry": Decimal("338.95"), "plan_proposed": json.dumps({"stop": 1}), "scored": [5, 1]}
+    pool = FakePool({"FROM ai.verdicts v": [row]})
+    got = await db.due_verdicts(pool, db.DEV_USER_ID, since)
+    assert got == [{**row, "plan_proposed": {"stop": 1}, "scored": [1, 5]}]
+    (_, sql, args), = pool.calls
+    assert args == (db.DEV_USER_ID, since)
+    assert "HAVING count(o.verdict_id) < 3" in sql and "ORDER BY v.asked_at ASC" in sql
+
+
+def _outcome(h):
+    return {"verdict_id": "11111111-1111-4111-8111-111111111111", "horizon_days": h,
+            "return_pct": Decimal("1.000"), "mae_pct": Decimal("-2.000"), "mfe_pct": Decimal("3.000"),
+            "stop_hit": None, "target_hit": None, "session_date": date(2026, 9, 22),
+            "first_hit": None, "r_multiple": None, "ask_session_bars": 1}
+
+
+@pytest.mark.asyncio
+async def test_insert_on_conflict_does_nothing():
+    """The statement itself carries DO NOTHING, and a conflict counts 0."""
+    answers = iter(["INSERT 0 1", "INSERT 0 0"])
+    pool = FakePool({"INSERT INTO ai.verdict_outcomes": lambda args: next(answers)})
+    assert await db.insert_outcomes(pool, [_outcome(1), _outcome(5)]) == 1
+    sql = pool.calls[0][1]
+    assert "ON CONFLICT (verdict_id, horizon_days) DO NOTHING" in sql
+    assert "UPDATE" not in sql, "an outcome row is never updated"
+    assert pool.calls[1][2] == tuple(_outcome(5)[c] for c in db.OUTCOME_COLUMNS)
+    assert pool.tx_open == 1, "one ticker, one transaction"
+    assert await db.insert_outcomes(pool, []) == 0
+
+
+@pytest.mark.asyncio
+async def test_store_failure_rolls_back_every_row_of_the_ticker():
+    pool = FakePool(raise_on="INSERT INTO ai.verdict_outcomes")
+    with pytest.raises(asyncpg.PostgresError):
+        await db.insert_outcomes(pool, [_outcome(1), _outcome(5)])
+    assert pool.calls == []

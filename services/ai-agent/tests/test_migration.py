@@ -106,3 +106,10 @@ def test_migration_008_adds_the_four_journal_columns(sql008):
     assert re.search(r"first_hit TEXT\s+CHECK \(first_hit IN \('stop', 'target', 'same_bar'\)\);", sql008)
     assert re.search(r"r_multiple NUMERIC\(8,3\);", sql008)
     assert re.search(r"ask_session_bars SMALLINT\s+CHECK \(ask_session_bars >= 0\);", sql008)
+
+
+def test_migrations_hold_every_outcome_column_db_py_writes(sql, sql008):
+    body = re.search(r"ai\.verdict_outcomes \((.*?)\n\);", sql, re.S).group(1)
+    for column in db.OUTCOME_COLUMNS:
+        assert re.search(rf"^\s+{column}\s+\S", body, re.M) or \
+            re.search(rf"ADD COLUMN IF NOT EXISTS {column} ", sql008), column

@@ -221,3 +221,75 @@ async def get_verdict(pool: asyncpg.Pool, verdict_id: str, user_id: str) -> Opti
 async def bump_served(pool: asyncpg.Pool, verdict_id: str, now) -> None:
     async with pool.acquire() as conn:
         await conn.execute(BUMP_SERVED_SQL, verdict_id, now)
+
+
+# ── ai.verdict_outcomes — the journal (Part 4.5) ─────────────────
+
+# Verdicts with at least one horizon unscored, asked since $2 — a cheap
+# pre-filter; the runner drops expired horizons by the calendar (spec 4.5
+# decision 5). `scored` lists the horizons that already have a row.
+DUE_VERDICTS_SQL = """
+SELECT v.id, v.ticker, v.asked_at, v.entry, v.plan_proposed,
+       COALESCE(array_agg(o.horizon_days) FILTER (WHERE o.horizon_days IS NOT NULL),
+                '{}') AS scored
+FROM ai.verdicts v
+LEFT JOIN ai.verdict_outcomes o ON o.verdict_id = v.id
+WHERE v.user_id = $1::uuid AND v.asked_at >= $2
+GROUP BY v.id
+HAVING count(o.verdict_id) < 3
+ORDER BY v.asked_at ASC, v.id ASC
+"""
+
+
+async def due_verdicts(pool: asyncpg.Pool, user_id: str, since) -> list[dict]:
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(DUE_VERDICTS_SQL, user_id, since)
+    out = []
+    for row in rows:
+        item = dict(row)
+        item["id"] = str(item["id"])
+        item["plan_proposed"] = _decode(item["plan_proposed"])
+        item["scored"] = sorted(int(h) for h in (item["scored"] or []))
+        out.append(item)
+    return out
+
+
+OUTCOME_COLUMNS = (
+    "verdict_id", "horizon_days", "return_pct", "mae_pct", "mfe_pct", "stop_hit",
+    "target_hit", "session_date", "first_hit", "r_multiple", "ask_session_bars",
+)
+
+# Scored once per horizon (spec 4.5 decision 8): 007's primary key and DO
+# NOTHING make a re-run, a second process or a crash-restart a no-op. A row
+# is never updated.
+INSERT_OUTCOME_SQL = """
+INSERT INTO ai.verdict_outcomes
+    (verdict_id, horizon_days, return_pct, mae_pct, mfe_pct, stop_hit,
+     target_hit, session_date, first_hit, r_multiple, ask_session_bars)
+VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+ON CONFLICT (verdict_id, horizon_days) DO NOTHING
+"""
+
+
+def _inserted(status) -> int:
+    """asyncpg's `INSERT 0 n` status → n; anything else counts as 0."""
+    try:
+        return int(str(status).rsplit(" ", 1)[1])
+    except (IndexError, ValueError):
+        return 0
+
+
+async def insert_outcomes(pool: asyncpg.Pool, rows: list[dict]) -> int:
+    """One ticker's outcome rows in ONE transaction: all of them or none
+    (spec 4.5 write 3). Returns how many were new."""
+    if not rows:
+        return 0
+    inserted = 0
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            for row in rows:
+                status = await conn.execute(
+                    INSERT_OUTCOME_SQL, *(row.get(c) for c in OUTCOME_COLUMNS)
+                )
+                inserted += _inserted(status)
+    return inserted

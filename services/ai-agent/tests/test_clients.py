@@ -131,3 +131,111 @@ async def test_risk_shield_down_still_answers(behaviour):
     async with client(handler) as http:
         macro = await upstream.fetch_macro(http, RS, 5)
     assert macro["status"] == "unavailable" and macro["regime"] is None and macro["brief"] is None
+
+
+# ── Part 4.5: the journal's refresh and bars reads ───────────────
+
+def refresh_body(daily=502, hourly=455):
+    return {"ticker": "AAPL", "dailyBars": daily, "hourlyBars": hourly,
+            "earningsDates": {"source": "yfinance", "stored": 8, "dropped": 0, "reason": None}}
+
+
+@pytest.mark.asyncio
+async def test_refresh_ok_request_shape():
+    seen = []
+
+    def handler(request):
+        seen.append((request.method, str(request.url)))
+        return httpx.Response(200, json=refresh_body())
+
+    async with client(handler) as http:
+        got = await upstream.refresh_ticker(http, DE + "/", " aapl ", 120)
+    assert got.kind == upstream.REFRESH_OK and (got.daily, got.hourly) == (502, 455)
+    assert seen == [("POST", f"{DE}/stock/AAPL/refresh")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("response, kind", [
+    (httpx.Response(429, headers={"Retry-After": "412"}, json={"detail": "recently"}), "cooldown"),
+    (httpx.Response(429, json={"detail": "Rate limited by data provider."}), "stop"),
+    (httpx.Response(502), "stop"),
+    (httpx.Response(503), "stop"),
+    (httpx.Response(400), "stop"),
+    (httpx.Response(200, text="<html>"), "stop"),
+    (httpx.Response(200, json={"ticker": "AAPL"}), "stop"),
+    (httpx.Response(200, json=refresh_body(daily=True)), "stop"),
+    (httpx.Response(200, json=refresh_body(daily=0, hourly=0)), "blank"),   # F2
+    (httpx.Response(200, json=refresh_body(daily=502, hourly=0)), "blank"),
+    (httpx.Response(200, json=refresh_body(daily=0, hourly=455)), "blank"),
+], ids=["cooldown", "provider-429", "502", "503", "400", "not-json", "no-counts",
+        "bool-count", "blank-both", "blank-hourly", "blank-daily"])
+async def test_refresh_answers_are_sorted(response, kind):
+    async with client(lambda request: response) as http:
+        got = await upstream.refresh_ticker(http, DE, "AAPL", 120)
+    assert got.kind == kind, got
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exc", [httpx.ConnectError("refused"), httpx.ReadTimeout("slow")])
+async def test_refresh_transport_error_is_stop(exc):
+    def handler(request):
+        raise exc
+
+    async with client(handler) as http:
+        got = await upstream.refresh_ticker(http, DE, "AAPL", 120)
+    assert got.kind == upstream.REFRESH_STOP and type(exc).__name__ in got.detail
+
+
+def bars_body(interval="1d", bars=None):
+    return {"ticker": "AAPL", "interval": interval, "bars": bars if bars is not None else [
+        {"ts": "2026-09-18T00:00:00+00:00", "open": 337.91, "high": 338.49,
+         "low": 332.53, "close": 336.13, "volume": 86433100}]}
+
+
+@pytest.mark.asyncio
+async def test_fetch_bars_request_and_answer():
+    from datetime import datetime, timezone
+    seen = []
+
+    def handler(request):
+        seen.append(request.url)
+        return httpx.Response(200, json=bars_body())
+
+    since = datetime(2026, 9, 18, tzinfo=timezone.utc)
+    async with client(handler) as http:
+        got = await upstream.fetch_bars(http, DE, "aapl", "1d", since, 10)
+    assert got[0]["ts"] == "2026-09-18T00:00:00+00:00"
+    assert seen[0].path == "/stock/AAPL/bars"
+    assert dict(seen[0].params) == {"interval": "1d", "since": "2026-09-18T00:00:00+00:00"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("response", [
+    httpx.Response(404, json={"detail": "No stored bars"}),
+    httpx.Response(503),
+    httpx.Response(200, text="nope"),
+    httpx.Response(200, json=bars_body(interval="1h")),
+    httpx.Response(200, json=bars_body(bars=[{"ts": "2026-09-18T00:00:00+00:00", "open": 1}])),
+    httpx.Response(200, json=bars_body(bars=[{"ts": 5, "open": 1, "high": 1, "low": 1, "close": 1}])),
+], ids=["404", "503", "not-json", "wrong-interval", "missing-keys", "ts-not-str"])
+async def test_bars_read_failures_are_typed(response):
+    from datetime import datetime, timezone
+    async with client(lambda request: response) as http:
+        with pytest.raises(upstream.BarsUnavailable):
+            await upstream.fetch_bars(http, DE, "AAPL", "1d", datetime(2026, 9, 18, tzinfo=timezone.utc), 10)
+
+
+@pytest.mark.asyncio
+async def test_journal_reads_refuse_bad_input_before_http():
+    from datetime import datetime, timezone
+
+    def handler(request):
+        raise AssertionError("no request may be sent")
+
+    async with client(handler) as http:
+        with pytest.raises(ValueError):
+            await upstream.refresh_ticker(http, DE, "AAPL1", 120)
+        with pytest.raises(ValueError):
+            await upstream.fetch_bars(http, DE, "AAPL", "5m", datetime(2026, 9, 18, tzinfo=timezone.utc), 10)
+        with pytest.raises(ValueError):
+            await upstream.fetch_bars(http, DE, "AAPL", "1d", datetime(2026, 9, 18), 10)
