@@ -94,6 +94,7 @@ def build(
         "route": route,
         "label": label,
         "model": (result.model if result is not None else model) or "unknown",
+        "host": result.host if result is not None else None,
         "tokens_in": _int(usage.get("input")),
         "tokens_out": _int(usage.get("output")),
         "tokens_reasoning": _int(usage.get("reasoning")),

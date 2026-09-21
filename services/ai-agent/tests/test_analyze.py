@@ -115,7 +115,7 @@ class Provider:
             data = WAIT                     # what strict decoding would force
         return LLMResult(data=data, model=MODEL, finish_reason="stop", duration_ms=9,
                          usage={"input": 6100, "output": 900, "reasoning": 300,
-                                "cacheWrite": 1400, "cost": 0.0212})
+                                "cacheWrite": 1400, "cost": 0.0212}, host="Anthropic")
 
 
 GO = {"verdict": "go", "confidence": 62, "reasoning": "Because.", "thesis": ["a", "b", "c"],
@@ -213,6 +213,7 @@ def test_analyze_returns_stores_and_ledgers_a_verdict(app):
     (call,) = state.db_pool.ledger()
     assert (call["route"], call["label"], call["outcome"], call["ticker"]) == ("analyze", "verdict", "ok", "AAPL")
     assert call["counters"] == ["llm_calls"] and call["verdict_id"] == VERDICT_ID
+    assert call["host"] == "Anthropic", "the host that served the verdict is on its ledger row"
     assert (call["tokens_in"], call["cache_write_tokens"], float(call["cost_usd"])) == (6100, 1400, 0.0212)
 
     sent = state.provider.calls[0]

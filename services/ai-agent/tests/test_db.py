@@ -26,7 +26,7 @@ VERDICT = {
 CALL = {
     "called_at": NOW, "et_day": date(2026, 9, 21), "user_id": db.DEV_USER_ID,
     "ticker": "AAPL", "route": "analyze", "label": "verdict", "model": "m",
-    "tokens_in": 10, "tokens_out": 5, "tokens_reasoning": None,
+    "host": "Anthropic", "tokens_in": 10, "tokens_out": 5, "tokens_reasoning": None,
     "cache_read_tokens": None, "cache_write_tokens": None,
     "cost_usd": Decimal("0.04"), "outcome": "ok", "counters": ["llm_calls"],
     "verdict_id": None,
@@ -61,7 +61,7 @@ async def test_insert_llm_call_parameter_order():
     await db.insert_llm_call(pool, CALL)
     kind, sql, args = pool.calls[0]
     assert sql == db.INSERT_LLM_CALL_SQL
-    assert sql.count("$") == len(db.LLM_CALL_COLUMNS) == len(args) == 16
+    assert sql.count("$") == len(db.LLM_CALL_COLUMNS) == len(args) == 17
     assert dict(zip(db.LLM_CALL_COLUMNS, args)) == CALL
 
 

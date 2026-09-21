@@ -20,9 +20,9 @@ NOW = datetime(2026, 9, 21, 16, 0, tzinfo=timezone.utc)     # 12:00 ET
 DAY = "2026-09-21"
 
 
-def result(**usage):
+def result(host="Anthropic", **usage):
     return LLMResult(data={}, model="anthropic/claude-sonnet-5", finish_reason="stop",
-                     duration_ms=1, usage=usage)
+                     duration_ms=1, usage=usage, host=host)
 
 
 def caps():
@@ -40,6 +40,9 @@ def test_build_maps_usage_and_keeps_missing_cost_null():
     assert (row["tokens_in"], row["tokens_out"], row["tokens_reasoning"]) == (6000, 900, 300)
     assert (row["cache_read_tokens"], row["cache_write_tokens"]) == (0, 1400)
     assert row["cost_usd"] == Decimal("0.0412")
+    assert row["host"] == "Anthropic", "which OpenRouter host served the call"
+    assert ledger.build(route="analyze", label="l", model="m", outcome="ok", counters=[],
+                        result=result(host=None), now=NOW)["host"] is None
 
     no_cost = ledger.build(route="classify", label="l", model="cfg", outcome="ok",
                            counters=[], result=result(input=1), now=NOW)
@@ -47,6 +50,7 @@ def test_build_maps_usage_and_keeps_missing_cost_null():
     failed = ledger.build(route="classify", label="l", model="cfg", outcome="unavailable",
                           counters=[], now=NOW)
     assert failed["model"] == "cfg" and failed["tokens_in"] is None and failed["cost_usd"] is None
+    assert failed["host"] is None, "a failed call never reported one"
 
 
 def test_et_day_is_the_et_date_not_utc():

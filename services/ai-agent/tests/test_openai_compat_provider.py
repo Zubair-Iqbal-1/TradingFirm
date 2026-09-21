@@ -147,7 +147,6 @@ def make(wire=None, *, key="sk-or-test", cap=100, redis=None, **over):
     # LLM_BASE_URL and LLM_DAILY_CALL_CAP, and _env_file=None does not hide
     # the process environment.
     over.setdefault("llm_base_url", "https://openrouter.ai/api/v1")
-    over.setdefault("llm_provider_order", "")
     settings = Settings(_env_file=None, llm_api_key=SecretStr(key),
                         llm_daily_call_cap=cap, llm_model=GLM, **over)
     http = None
@@ -689,39 +688,99 @@ async def test_cache_system_sends_cache_control_block():
     assert result.usage["cacheWrite"] == 1400 and result.usage["cacheRead"] == 0
 
 
-# ── Part 4.4: LLM_PROVIDER_ORDER ─────────────────────────────────
+# ── Part 4.4: LLM_PROVIDER_ORDER and the serving host ────────────
+
+def served(host, **kw):
+    """ok() with OpenRouter's top-level `provider` field on the body."""
+    response = ok(**kw)
+    body = json.loads(response.content)
+    if host is not None:
+        body["provider"] = host
+    return httpx2.Response(200, json=body)
+
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("model", [GLM, HAIKU])
-async def test_provider_field_absent_when_setting_is_empty(model):
-    """The default: OpenRouter routes as it always has, and the body is
-    byte-for-byte what it was before the setting existed."""
+@pytest.mark.parametrize("model", [GLM, SONNET, HAIKU])
+async def test_provider_field_present_with_the_default(model):
+    """No setting anywhere: the declared default asks for Anthropic first and
+    lets OpenRouter fall back."""
+    assert Settings.model_fields["llm_provider_order"].default == "anthropic"
     wire = Wire(ok())
     await call(make(wire, redis=FakeRedis()), model=model)
-    assert "provider" not in wire.body
-    if model == HAIKU:                       # no reasoning either: no extra keys at all
-        assert set(wire.body) == {"model", "max_tokens", "messages", "response_format"}
+    assert wire.body["provider"] == {"order": ["anthropic"], "allow_fallbacks": True}
+    assert ("reasoning" in wire.body) is (model != HAIKU), "reasoning rides beside it, unchanged"
 
 
 @pytest.mark.asyncio
-async def test_provider_field_present_and_exact_when_set():
+async def test_comma_list_keeps_its_order():
     wire = Wire(ok())
-    await call(make(wire, redis=FakeRedis(), llm_provider_order="anthropic"), model=SONNET)
-    assert wire.body["provider"] == {"order": ["anthropic"], "allow_fallbacks": False}
-    assert wire.body["reasoning"] == {"effort": "low"}, "reasoning rides beside it, unchanged"
+    await call(make(wire, redis=FakeRedis(),
+                    llm_provider_order=" Google-Vertex , anthropic,amazon-bedrock/us "))
+    assert wire.body["provider"]["order"] == ["google-vertex", "anthropic", "amazon-bedrock/us"]
 
-    wire = Wire(ok())
-    await call(make(wire, redis=FakeRedis(), llm_provider_order=" Anthropic , google-vertex "),
-               model=HAIKU)
-    assert wire.body["provider"] == {"order": ["anthropic", "google-vertex"],
-                                     "allow_fallbacks": False}
-    assert "reasoning" not in wire.body
+
+@pytest.mark.parametrize("order", ["anthropic", "a,b,c", "google-vertex", " x "])
+def test_allow_fallbacks_is_always_true(order):
+    """There is no false path: the order is a preference, never a pin."""
+    from providers import openai_compat_provider as module
+    assert module.provider_routing(order)["allow_fallbacks"] is True
+    import inspect
+    assert '"allow_fallbacks": False' not in inspect.getsource(module)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("bad", ["anthropic; drop", "a b", "../x", "{}", "anthropic,,"[:-1] + "!"])
+async def test_explicitly_empty_order_sends_no_provider_object():
+    wire = Wire(ok())
+    await call(make(wire, redis=FakeRedis(), llm_provider_order=""), model=HAIKU)
+    assert set(wire.body) == {"model", "max_tokens", "messages", "response_format"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", ["anthropic; drop", "a b", "../x", "{}", "anthropic!"])
 async def test_malformed_provider_order_is_refused_before_http(bad):
     wire, r = Wire(ok()), FakeRedis()
     with pytest.raises(ValueError):
         await call(make(wire, redis=r, llm_provider_order=bad))
     assert wire.requests == [] and r.store == {}, "nothing sent, nothing reserved"
+
+
+@pytest.mark.asyncio
+async def test_host_recorded_from_the_response_body(caplog):
+    with caplog.at_level("INFO"):
+        result = await call(make(Wire(served("Anthropic")), redis=FakeRedis()))
+    assert result.host == "Anthropic"
+    assert "host=Anthropic" in caplog.text
+    assert not [r for r in caplog.records if r.levelname == "WARNING"], "first choice served: quiet"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("host", [None, "", "   ", 7, {"name": "x"}])
+async def test_host_absent_or_unusable_is_none_and_never_warns(host, caplog):
+    with caplog.at_level("WARNING"):
+        result = await call(make(Wire(served(host)), redis=FakeRedis()))
+    assert result.host is None and "fell back" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_fallback_warning_fires_when_another_host_served(caplog):
+    with caplog.at_level("WARNING"):
+        result = await call(make(Wire(served("Google Vertex")), redis=FakeRedis()))
+    assert result.host == "Google Vertex", "still recorded, still a success"
+    (record,) = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert "'Google Vertex'" in record.message and "'anthropic'" in record.message
+    assert "fell back" in record.message
+
+
+@pytest.mark.asyncio
+async def test_fallback_compares_against_the_first_entry_only(caplog):
+    provider = make(Wire(served("Google Vertex")), redis=FakeRedis(),
+                    llm_provider_order="google-vertex/us,anthropic")
+    with caplog.at_level("WARNING"):
+        await call(provider)
+    assert "fell back" not in caplog.text, "a region suffix on the order entry is ignored"
+
+    provider = make(Wire(served("Anthropic")), redis=FakeRedis(),
+                    llm_provider_order="google-vertex,anthropic")
+    with caplog.at_level("WARNING"):
+        await call(provider)
+    assert "fell back" in caplog.text, "the second choice serving IS a fallback"

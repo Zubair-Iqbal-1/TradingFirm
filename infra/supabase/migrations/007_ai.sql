@@ -124,6 +124,7 @@ CREATE TABLE IF NOT EXISTS ai.llm_calls (
     route               TEXT NOT NULL CHECK (route IN ('analyze', 'classify')),
     label               TEXT NOT NULL,
     model               TEXT NOT NULL,
+    host                TEXT,       -- the OpenRouter host that served it; NULL = not reported
     tokens_in           INTEGER,
     tokens_out          INTEGER,
     tokens_reasoning    INTEGER,

@@ -73,17 +73,17 @@ async def get_settings(pool: asyncpg.Pool, user_id: str) -> Optional[dict]:
 # ── ai.llm_calls ─────────────────────────────────────────────────
 
 LLM_CALL_COLUMNS = (
-    "called_at", "et_day", "user_id", "ticker", "route", "label", "model",
+    "called_at", "et_day", "user_id", "ticker", "route", "label", "model", "host",
     "tokens_in", "tokens_out", "tokens_reasoning", "cache_read_tokens",
     "cache_write_tokens", "cost_usd", "outcome", "counters", "verdict_id",
 )
 
 INSERT_LLM_CALL_SQL = """
 INSERT INTO ai.llm_calls
-    (called_at, et_day, user_id, ticker, route, label, model,
+    (called_at, et_day, user_id, ticker, route, label, model, host,
      tokens_in, tokens_out, tokens_reasoning, cache_read_tokens,
      cache_write_tokens, cost_usd, outcome, counters, verdict_id)
-VALUES ($1, $2, $3::uuid, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::text[], $16::uuid)
+VALUES ($1, $2, $3::uuid, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16::text[], $17::uuid)
 """
 
 

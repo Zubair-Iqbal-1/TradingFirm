@@ -158,17 +158,47 @@ _PROVIDER_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9._/-]{0,63}$")
 
 def provider_routing(order: str) -> Optional[dict]:
     """The request's `provider` object for LLM_PROVIDER_ORDER, or None when
-    the setting is empty (the field is then absent and OpenRouter routes as
-    it always has). `allow_fallbacks` is false on purpose: the point of
-    naming a host is to stay on it. Raises ValueError on a malformed slug —
-    pre-flight step 1, so a bad setting sends nothing and reserves nothing."""
+    the setting is explicitly empty. `allow_fallbacks` is ALWAYS true and
+    there is no setting that makes it false: the order is a preference, so a
+    host that is down costs a cache miss, never a failed call. Raises
+    ValueError on a malformed slug — pre-flight step 1, so a bad setting
+    sends nothing and reserves nothing."""
     if not isinstance(order, str) or not order.strip():
         return None
     slugs = [part.strip().lower() for part in order.split(",") if part.strip()]
     for slug in slugs:
         if not _PROVIDER_SLUG_RE.match(slug):
             raise ValueError("LLM_PROVIDER_ORDER must be provider slugs, comma-separated")
-    return {"order": slugs, "allow_fallbacks": False}
+    return {"order": slugs, "allow_fallbacks": True}
+
+
+HOST_MAX = 100
+
+
+def served_by(response) -> Optional[str]:
+    """The host OpenRouter says served the call: the response body's
+    top-level `provider` ("Anthropic", "Google Vertex", …). Not part of the
+    OpenAI schema, so the SDK carries it as an extra attribute. None when it
+    is absent or not a usable string."""
+    host = getattr(response, "provider", None)
+    if not isinstance(host, str) or not host.strip():
+        return None
+    return "".join(ch for ch in host.strip() if ch.isprintable())[:HOST_MAX] or None
+
+
+def host_slug(host: str) -> str:
+    """A served-by name in slug form, for comparing with an order entry:
+    "Google Vertex" -> "google-vertex"."""
+    return "-".join(host.lower().split())
+
+
+def is_fallback(host: Optional[str], routing: Optional[dict]) -> bool:
+    """True when a host was reported and it is not the first one asked for.
+    An order entry may carry a region ("amazon-bedrock/us"); the host name
+    never does, so only the part before the slash is compared."""
+    if not host or not routing or not routing.get("order"):
+        return False
+    return host_slug(host) != routing["order"][0].split("/")[0]
 
 
 def _system_content(system: str, cache_system: bool):
@@ -360,6 +390,12 @@ class OpenAICompatProvider(LLMProvider):
             raise fail(LLMUnavailable(f"sdk: {type(e).__name__}")) from None
 
         data, finish_reason, usage = self._parse(response, schema, fail)
+        host = served_by(response)
+        if is_fallback(host, routing):
+            logger.warning(
+                f"llm call label={label} served by {host!r}, not {routing['order'][0]!r}: "
+                f"OpenRouter fell back, so this call read no prompt cache from the preferred host"
+            )
 
         duration_ms = int((time.monotonic() - started) * 1000)
         parts = " ".join(f"{k}={v}" for k, v in (
@@ -371,7 +407,7 @@ class OpenAICompatProvider(LLMProvider):
             ("cost", usage.get("cost")),
         ) if v is not None)
         logger.info(
-            f"llm call label={label} model={model} {parts} "
+            f"llm call label={label} model={model} host={host} {parts} "
             f"finish={finish_reason} ms={duration_ms} callsToday={calls}/{cap}"
         )
         return LLMResult(
@@ -380,6 +416,7 @@ class OpenAICompatProvider(LLMProvider):
             finish_reason=finish_reason,
             duration_ms=duration_ms,
             usage=usage,
+            host=host,
         )
 
     # ── error mapping ────────────────────────────────────────────

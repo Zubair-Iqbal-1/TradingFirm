@@ -84,6 +84,9 @@ class LLMResult:
     finish_reason: Optional[str]
     duration_ms: int
     usage: dict = field(default_factory=dict)
+    # Which OpenRouter host served the call (Part 4.4), or None if the
+    # gateway did not say. Stored in ai.llm_calls.host.
+    host: Optional[str] = None
 
 
 # ── Request validation (pre-flight step 1) ───────────────────────

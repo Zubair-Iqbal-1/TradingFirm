@@ -94,14 +94,16 @@ class Settings(BaseSettings):
     # source cooldown in the repo.
     llm_cooldown_seconds: int = 900
 
-    # OpenRouter provider routing (Part 4.4). Empty = OpenRouter's normal
-    # routing across every host of the model. Set (e.g. "anthropic", or a
-    # comma-separated list in order of preference), every request carries
-    # provider: {"order": [...], "allow_fallbacks": false}: the listed hosts
-    # only, never another. It exists because a prompt cache is per host, so
-    # routing that moves between five hosts rarely reads what it wrote.
-    # Never set in the dev twin.
-    llm_provider_order: str = ""
+    # OpenRouter provider routing (Part 4.4). Every request carries
+    # provider: {"order": [...], "allow_fallbacks": true}: try the listed
+    # hosts first, in this order (comma-separated), and let OpenRouter fall
+    # back to another host if they cannot serve — a preference, never a pin,
+    # so a host outage degrades the prompt cache and not the analyst. It
+    # exists because a prompt cache is per host, and unordered routing across
+    # five hosts rarely reads what it wrote. The host that actually served
+    # each call is stored in ai.llm_calls.host, and a fallback is a WARNING.
+    # An explicitly empty value sends no provider object at all.
+    llm_provider_order: str = "anthropic"
 
     # OpenRouter app attribution. Sent as HTTP-Referer / X-Title only when
     # non-empty; never a hard-coded value.

@@ -104,16 +104,6 @@ def test_twin_never_calls_prod_risk_shield():
     assert s.llm_verdict_cache is False
 
 
-def test_provider_order_is_never_set_in_the_twin():
-    """LLM_PROVIDER_ORDER is prod's .env only. Empty by declaration and empty
-    here: the twin's block does not carry it, so its requests (which the
-    other locks stop anyway) would never name a host."""
-    import os
-    assert Settings.model_fields["llm_provider_order"].default == ""
-    assert Settings().llm_provider_order == ""
-    assert not os.environ.get("LLM_PROVIDER_ORDER")
-
-
 def test_analyze_defaults():
     fields = Settings.model_fields
     assert fields["risk_shield_url"].default == "http://risk-shield:8003"
@@ -121,6 +111,7 @@ def test_analyze_defaults():
     assert fields["verdict_cache_ttl"].default == 14400
     assert fields["dossier_timeout"].default == 60.0
     assert fields["risk_shield_timeout"].default < fields["dossier_timeout"].default
+    assert fields["llm_provider_order"].default == "anthropic"
 
 
 def test_classifier_cap_default_is_smaller_than_the_global_one():
