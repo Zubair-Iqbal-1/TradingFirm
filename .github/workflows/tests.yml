@@ -115,7 +115,8 @@ jobs:
             # locks that keep this suite off a live LLM: an empty key, a zero
             # daily cap, and an .invalid base URL (Part 4.1), plus a zero
             # classifier cap and a dev-twin DATA_ENGINE_URL (Part 4.2), and a
-            # dev-twin RISK_SHIELD_URL with the verdict cache flag off (4.4).
+            # dev-twin RISK_SHIELD_URL with the verdict cache flag off (4.4),
+            # and the journal scorer's slot hard-coded off (4.5).
             env: >-
               -e SERVICE_NAME=ai-agent-dev
               -e SERVICE_PORT=8004
@@ -126,6 +127,7 @@ jobs:
               -e DATA_ENGINE_URL=http://data-engine-dev:8001
               -e RISK_SHIELD_URL=http://risk-shield-dev:8003
               -e LLM_VERDICT_CACHE=false
+              -e JOURNAL_SCORING_ENABLED=false
               -e DATABASE_URL=postgresql+asyncpg://ci:ci@postgres:5432/tradingfirm_dev
               -e REDIS_URL=redis://redis:6379/1
             tests: >-
@@ -148,6 +150,12 @@ jobs:
               tests/test_verdict_prompt.py
               tests/test_analyze.py
               tests/test_analyze_cache.py
+              tests/test_sessions.py
+              tests/test_scoring.py
+              tests/test_journal_runner.py
+              tests/test_wallclock.py
+              tests/test_journal_loop.py
+              tests/test_journal_stats.py
 
     steps:
       - uses: actions/checkout@v5
