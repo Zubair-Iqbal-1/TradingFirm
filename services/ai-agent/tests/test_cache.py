@@ -90,11 +90,14 @@ class FakeRedis:
         self.ttls[key] = ttl
         return True
 
-    async def set(self, key, value, ex=None):
+    async def set(self, key, value, ex=None, nx=False):
         self._check()
+        if nx and key in self.store:
+            return None
         self.store[key] = value
         if ex is not None:
             self.ttls[key] = ex
+        return True
 
     async def get(self, key):
         self._check()
@@ -107,6 +110,16 @@ class FakeRedis:
     async def mget(self, keys):
         self._check()
         return [self.store.get(k) for k in keys]
+
+    async def incrby(self, key, amount):
+        self._check()
+        self.store[key] = str(int(self.store.get(key, "0")) + int(amount))
+        return int(self.store[key])
+
+    async def delete(self, key):
+        self._check()
+        self.ttls.pop(key, None)
+        return 1 if self.store.pop(key, None) is not None else 0
 
     async def incrbyfloat(self, key, amount):
         self._check()
@@ -351,7 +364,7 @@ async def test_read_usage_from_redis_and_from_memory():
     live = await cache.read_usage(r, caps, cost, NOON)
     assert live == {"day": "2026-09-20", "month": "2026-09", "source": "redis",
                     "llmCalls": 1, "classifierCalls": 1, "costMissing": 0,
-                    "costToday": 0.0057, "costMonth": 0.0057}
+                    "costToday": 0.0057, "costMonth": 0.0057, "ledgerMissed": 0}
 
     empty = await cache.read_usage(FakeRedis(), caps, cost, NOON)
     assert empty["llmCalls"] == 0 and empty["costToday"] == 0.0
@@ -497,3 +510,68 @@ async def test_create_redis_propagates_a_failed_ping(monkeypatch):
 
     with pytest.raises(ConnectionError):
         await cache.create_redis("redis://nowhere:6379")
+
+
+# ── Part 4.4: seeding from the ledger ────────────────────────────
+
+@pytest.mark.asyncio
+async def test_seed_counter_uses_41s_key_and_expiry_rule():
+    """The seed writes 4.1's own key by 4.1's own rule: a relative INCRBY,
+    then EXPIRE 129600 NX — never a SET, which would drop the TTL."""
+    r, mem = FakeRedis(), cache.MemoryCap()
+    added = await cache.seed_counter(r, mem, 7, NOON)
+    key = "tf:ai:state:llm_calls:2026-09-20"
+    assert key == cache.day_counter_key(NOON)
+    assert added == 7 and r.store == {key: "7"}
+    assert r.expire_calls == [(key, 129600, True)]
+    assert mem.count("2026-09-20") == 7
+
+
+@pytest.mark.asyncio
+async def test_seed_counter_takes_the_max_and_keeps_the_ttl():
+    r, mem = FakeRedis(), cache.MemoryCap()
+    for _ in range(3):
+        await cache.reserve_call(r, mem, NOON, name=cache.STATE_CLASSIFIER_CALLS)
+    key = "tf:ai:state:classifier_calls:2026-09-20"
+    r.ttls[key] = 500                                  # an older key, part-way through its life
+
+    assert await cache.seed_counter(r, mem, 2, NOON, name=cache.STATE_CLASSIFIER_CALLS) == 0
+    assert r.store[key] == "3", "Redis was higher: untouched"
+
+    assert await cache.seed_counter(r, mem, 5, NOON, name=cache.STATE_CLASSIFIER_CALLS) == 2
+    assert r.store[key] == "5"
+    assert r.ttls[key] == 500, "NX: the seed never pushes an expiry forward"
+
+
+@pytest.mark.asyncio
+async def test_seed_counter_without_redis_fills_memory_only():
+    mem = cache.MemoryCap()
+    mem.incr("2026-09-20")
+    assert await cache.seed_counter(None, mem, 4, NOON) == 0
+    assert mem.count("2026-09-20") == 4
+    mem.seed("2026-09-20", 1)
+    assert mem.count("2026-09-20") == 4, "never lowered"
+
+
+@pytest.mark.asyncio
+async def test_seed_cost_raises_both_totals_by_the_shortfall():
+    r, mem = FakeRedis(), cache.MemoryCost()
+    await cache.record_cost(r, mem, 0.01, NOON)
+    await cache.seed_cost(r, mem, 0.05, 0.75, NOON)
+    assert float(r.store["tf:ai:state:cost_day:2026-09-20"]) == pytest.approx(0.05)
+    assert float(r.store["tf:ai:state:cost_month:2026-09"]) == pytest.approx(0.75)
+    assert all(nx and ttl == cache.TTL_COST for _, ttl, nx in r.expire_calls)
+
+    await cache.seed_cost(r, mem, 0.02, 0.10, NOON)             # ledger lower: untouched
+    assert float(r.store["tf:ai:state:cost_day:2026-09-20"]) == pytest.approx(0.05)
+    assert float(r.store["tf:ai:state:cost_month:2026-09"]) == pytest.approx(0.75)
+
+
+@pytest.mark.asyncio
+async def test_usage_reports_ledger_missed():
+    r = FakeRedis()
+    r.store["tf:ai:state:ledger_missed:2026-09-20"] = "2"
+    caps = {cache.STATE_LLM_CALLS: cache.MemoryCap(),
+            cache.STATE_CLASSIFIER_CALLS: cache.MemoryCap()}
+    assert (await cache.read_usage(r, caps, cache.MemoryCost(), NOON))["ledgerMissed"] == 2
+    assert (await cache.read_usage(None, caps, cache.MemoryCost(), NOON))["ledgerMissed"] == 0

@@ -44,6 +44,7 @@ STATE_CLASSIFIER_CALLS = "classifier_calls"       # Part 4.2's second cap
 STATE_COST_DAY = "cost_day"
 STATE_COST_MONTH = "cost_month"
 STATE_COST_MISSING = "cost_missing"
+STATE_LEDGER_MISSED = "ledger_missed"             # Part 4.4: rows ai.llm_calls lacks
 
 # Part 4.2: the classification cache, `tf:ai:classify:{digest}`.
 CLASSIFY_PREFIX = f"{AI_PREFIX}classify:"
@@ -240,6 +241,11 @@ class MemoryCap:
     def count(self, day: str) -> int:
         return self._counts.get(day, 0)
 
+    def seed(self, day: str, count: int) -> int:
+        """Raise the day's count to `count`, never lower it (Part 4.4)."""
+        self._counts[day] = max(self._counts.get(day, 0), int(count))
+        return self._counts[day]
+
 
 # ── The daily call cap ───────────────────────────────────────────
 
@@ -379,6 +385,10 @@ class MemoryCost:
     def total(self, period: str) -> float:
         return self._totals.get(period, 0.0)
 
+    def seed(self, period: str, amount: float) -> None:
+        """Raise a period's total to `amount`, never lower it (Part 4.4)."""
+        self._totals[period] = max(self._totals.get(period, 0.0), float(amount))
+
     def missing(self, day: str) -> int:
         return self._missing.get(day, 0)
 
@@ -428,6 +438,71 @@ async def record_cost(
     memory.add(day, month, amount)
 
 
+# ── Seeding from the ledger (Part 4.4) ───────────────────────────
+#
+# Redis has no durable persistence (spec 4.2 decision 19): a `docker compose
+# down` resets today's counters to zero. At startup the ledger in Postgres
+# says how many calls really went out today, and each counter is raised to
+# that number when it is lower. Max of the two, never an overwrite — either
+# side can be the short one (the ledger misses a row when its write failed).
+#
+# The keys are 4.1's and 4.2's own, written by their own rule: a relative
+# INCRBY / INCRBYFLOAT of the shortfall, then `EXPIRE key ttl NX`. A plain
+# SET would drop the key's TTL and the EXPIRE would then push the expiry
+# forward, which is exactly what NX exists to prevent.
+#
+#   tf:ai:state:llm_calls:{YYYY-MM-DD}          TTL_DAY_COUNTER (129600) NX
+#   tf:ai:state:classifier_calls:{YYYY-MM-DD}   TTL_DAY_COUNTER (129600) NX
+#   tf:ai:state:cost_day:{YYYY-MM-DD}           TTL_COST (3456000) NX
+#   tf:ai:state:cost_month:{YYYY-MM}            TTL_COST (3456000) NX
+
+async def seed_counter(
+    r: Optional[aioredis.Redis],
+    memory: MemoryCap,
+    target: int,
+    now: Optional[datetime] = None,
+    *,
+    name: str = STATE_LLM_CALLS,
+) -> int:
+    """Raise today's `name` counter to `target` if it is lower. Returns the
+    shortfall that was added to Redis (0 when Redis already had it, or is
+    absent). The in-process counter is seeded either way, so a Redis that
+    dies later does not restart the day at zero."""
+    memory.seed(et_day(now), target)
+    if r is None or target <= 0:
+        return 0
+    key = day_counter_key(now, name=name)
+    current = int(await r.get(key) or 0)
+    shortfall = int(target) - current
+    if shortfall <= 0:
+        return 0
+    await r.incrby(key, shortfall)
+    await r.expire(key, TTL_DAY_COUNTER, nx=True)
+    return shortfall
+
+
+async def seed_cost(
+    r: Optional[aioredis.Redis],
+    memory: MemoryCost,
+    cost_day: float,
+    cost_month: float,
+    now: Optional[datetime] = None,
+) -> None:
+    """The same rule for today's and the month's USD totals."""
+    memory.seed(et_day(now), cost_day)
+    memory.seed(et_month(now), cost_month)
+    if r is None:
+        return
+    for key, target in (
+        (day_counter_key(now, name=STATE_COST_DAY), cost_day),
+        (month_counter_key(now, name=STATE_COST_MONTH), cost_month),
+    ):
+        shortfall = float(target) - float(await r.get(key) or 0.0)
+        if shortfall > 1e-9:
+            await r.incrbyfloat(key, shortfall)
+            await r.expire(key, TTL_COST, nx=True)
+
+
 async def read_usage(
     r: Optional[aioredis.Redis],
     memory_caps: dict[str, MemoryCap],
@@ -451,11 +526,12 @@ async def read_usage(
                 day_counter_key(now, name=STATE_COST_MISSING),
                 day_counter_key(now, name=STATE_COST_DAY),
                 month_counter_key(now, name=STATE_COST_MONTH),
+                day_counter_key(now, name=STATE_LEDGER_MISSED),
             ])
         except Exception as e:
             logger.warning(f"usage read failed, answering from in-process state: {e}")
         else:
-            llm, classifier, missing, cost_day, cost_month = values
+            llm, classifier, missing, cost_day, cost_month, ledger_missed = values
             return {
                 "day": day, "month": month, "source": "redis",
                 "llmCalls": int(llm or 0),
@@ -463,6 +539,7 @@ async def read_usage(
                 "costMissing": int(missing or 0),
                 "costToday": round(float(cost_day or 0.0), 6),
                 "costMonth": round(float(cost_month or 0.0), 6),
+                "ledgerMissed": int(ledger_missed or 0),
             }
     return {
         "day": day, "month": month, "source": "memory",
@@ -471,6 +548,7 @@ async def read_usage(
         "costMissing": memory_cost.missing(day),
         "costToday": round(memory_cost.total(day), 6),
         "costMonth": round(memory_cost.total(month), 6),
+        "ledgerMissed": 0,
     }
 
 
