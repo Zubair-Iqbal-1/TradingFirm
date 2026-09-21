@@ -181,6 +181,9 @@ Reference implementation: `scanner/pro_scan.py` (523 lines)
 ### Production Changes (G15 in this repo)
 - **Needs a go**: `./scripts/migrate.sh` against prod (`tradingfirm`), and `docker compose up -d [--build] data-engine` or any other prod service recreate/rebuild. Also `.env` secret rotation and any `DELETE`/`TRUNCATE` on prod tables.
 - **Needs no ask**: `scripts/dev-db.sh`, anything on the dev twin (`tf-data-engine-dev`, `tradingfirm_dev`, Redis DB 1), tests, fixtures.
+- **Scheduled writers in prod** — restart a service only in the minute after its last scheduled row landed, and prove the next row:
+  - `risk-shield` → market checks in XNYS hours, the 16:20 ET settle, night checks at :15 / :45 ET while CME trades, the news poll every 15 min; rebuilds outside XNYS hours (CLAUDE.md timing rule)
+  - `ai-agent` → journal slot 17:30 ET on XNYS sessions (Part 4.5); **no `up -d ai-agent` between 17:25 and 18:15 ET**
 - **Prod migrations applied before this rule existed**: 0.2 (`001_initial_schema.sql`), 1.1 (`002_bars.sql`), 2.1 (`003_context.sql`). Prod container recreated without asking by 1.6, 1.6 follow-up, 1.7, 2.1.
 
 ### Operations

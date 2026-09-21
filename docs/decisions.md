@@ -1036,3 +1036,57 @@ On all four pre-expiry nights the 00:15 reading sat at ES −0.85…−0.95 / NQ
 **Also measured:** a 30-headline classifier batch is 6,349 in / 2,628 out = $0.039, above spec 4.4's $0.03 guess, because thirty 300-character summaries ride in the prompt. Reasoning tokens were 0 on all three calls at effort `low`.
 
 **Supersedes:** spec 4.4 decision 12's "off by default, not measured yet" for prod, and decision 14's classifier estimate.
+
+---
+
+## 2026-09-21 — The journal scorer refreshes the tickers it scores (Part 4.5)
+
+**Decision:** at 17:30 ET on each XNYS session, ai-agent calls data-engine's existing `POST /stock/{t}/refresh` for every ticker with a horizon due tonight — one at a time, ≤ 20 attempts a night (retries included), 5 s apart, none after 18:10 — then reads the bars back. Worst case ~60 yfinance requests and ≤ 20 Alpha Vantage calls a night; data-engine's own AV limiter absorbs the rate, and an AV refusal never stops the night.
+
+**Why:** nothing stores daily bars on a schedule, so a verdict's ticker would never get its bar by itself.
+
+**Supersedes:** plan §2's "Journal scoring nightly — data-engine bar store — 0 external". **For 8.1:** at ~20 verdicts a day, each due at five horizons, due tickers reach ~60–100 a night against the cap of 20; a nightly bar job in data-engine (option C) becomes necessary then. Raise it at 8.1's G1.
+
+---
+
+## 2026-09-21 — Known defect: an empty data-engine refresh answers 200 and starts the cooldown (4.5 F2)
+
+**Decision:** recorded, not fixed in 4.5. On the housekeeping list: "refresh: empty download must not answer 200 or start the cooldown; surface yfinance rate limits". Fixed with option C.
+
+**Why:** yfinance 1.5.1 swallows rate limits, so a delisted symbol and a rate-limited download both answer `200` with zero bars and start the 15 min cooldown; `/dossier` is fooled the same way. 4.5 works around it: a blank answer skips the ticker, a second blank stops the night, and every blanked ticker runs last for 7 days.
+
+**Supersedes:** N/A.
+
+---
+
+## 2026-09-21 — Journal scoring rules (Part 4.5)
+
+**Decision:**
+- Horizons +1 / +5 / +20 / +30 / +60 (one tuple, `journal.sessions.HORIZONS`; added 2026-09-22 before the first push). +N is the Nth XNYS session after day 0 (`exchange_calendars` counts; stored bar dates must match). The selection pre-filter is 110 calendar days: a +60 horizon is last due 70 sessions after day 0. Asked during a session → day 0 is that session and the window starts with its hourly bars that begin at or after the ask; asked outside one → day 0 is the last closed session.
+- Stop / target on bar lows / highs against the stored plan (a touch over-counts stops against D8's hourly close); same bar = stop first; the target is not an exit; no plan → no stop / target.
+- A first window bar > 30 % from entry is a price-scale break (bars are split-adjusted): left unscored. A horizon expires 10 sessions after its target. Scored once, never updated.
+- Migration `008_journal.sql` adds the columns and widens 007's horizon CHECK to the five, in one statement (`migrate.sh` runs a file without a transaction); `007_ai.sql` is on prod and pinned by SHA-256.
+
+**Why:** spec 4.5 decisions 2–9.
+
+**Supersedes:** plan row 4.5's "+1/+5/+20 trading days" (now five horizons).
+
+---
+
+## 2026-09-21 — No line estimates in specs
+
+**Decision:** specs carry a commit list and no line estimates or bands. A commit that measures over 600 lines (numstat, code + tests) is split before the first push.
+
+**Why:** user decision at the 4.5 review.
+
+**Supersedes:** 2026-09-10 "An addition after approval re-cuts its commit's band" and "Separate estimate bands for code and tests"; the estimate half of 2026-09-10 "Commit sizes are checked before the first push".
+
+---
+
+## 2026-09-21 — G15's scheduled writers are listed in `.agents/AGENTS.md`
+
+**Decision:** the G15 project rules list every prod scheduled writer and its no-restart window. ai-agent joins with the journal slot: no `up -d ai-agent` between 17:25 and 18:15 ET.
+
+**Why:** the restart rule lived only in progress rows; from 4.5 a second service writes on a schedule.
+
+**Supersedes:** N/A.
