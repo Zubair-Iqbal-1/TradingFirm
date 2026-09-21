@@ -1014,3 +1014,13 @@ On all four pre-expiry nights the 00:15 reading sat at ES −0.85…−0.95 / NQ
 **Why:** a paid verdict thrown away for a 310-character bullet helps nobody, and 4.2 already trims `oneLine`. Naming it keeps "never repaired" true everywhere else.
 
 **Supersedes:** nothing.
+
+---
+
+## 2026-09-21 — The provider order is a preference with fallbacks always on, and the serving host is recorded
+
+**Decision:** `LLM_PROVIDER_ORDER` defaults to `anthropic`, and every request carries `provider: {"order": [...], "allow_fallbacks": true}`. There is no false path. OpenRouter's response `provider` is stored as `ai.llm_calls.host` (added to 007 in place; it was applied only on `tradingfirm_dev`), and a served-by host other than `order[0]` logs a WARNING. The setting is not a twin lock, and the test that treated it as one is dropped.
+
+**Why:** the pin bought cache hits at the price of failing every call when one host is down. A preference gets the same hits on a normal day and a slower, dearer call on a bad one, and the ledger shows which it was.
+
+**Supersedes:** the entry above, "`LLM_PROVIDER_ORDER` pins OpenRouter's host, with no fallback" (same day, never pushed or deployed). No `.env` line is needed.
