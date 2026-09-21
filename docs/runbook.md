@@ -117,11 +117,19 @@ guess.
 
 ## Missed slots
 
-risk-shield's night checks (Part 3.4b) have **155 slots in a full week**. A week runs from Sunday evening to Friday: Sun 18:15–23:45 ET (12 slots), Mon–Thu (31 each), Fri 00:15–16:45 (19). A slot is **missed** if it has no `risk.health_checks` row, or if its row's `overlay.status` is `unavailable` (the check ran but had no futures quotes). Add one row per week. A week with 0 missed still gets a row.
+risk-shield's night checks (Part 3.4b) run on a :15 / :45 ET grid while CME futures trade (`scheduler.night_slots_for_day`). Three windows are cut: the 17:00–18:00 halt, the Friday 17:00 close, and every slot after 08:45 up to and including the 16:20 settle on an XNYS day (open − 45 min, strictly after, through settle). That gives:
+
+| day | pre-open | after settle | evening | slots |
+|---|---|---|---|---|
+| Sun | — | — | 18:15–23:45 (12) | **12** |
+| Mon–Thu | 00:15–08:45 (18) | 16:45 (1) | 18:15–23:45 (12) | **31** each |
+| Fri | 00:15–08:45 (18) | 16:45 (1) | — | **19** |
+
+A full week is 12 + 4 × 31 + 19 = **155**. 09:15 and 16:15 are never slots. A slot is **missed** if it has no `risk.health_checks` row, or if its row's `overlay.status` is `unavailable` (the check ran but had no futures quotes). Add one row per week. A week with 0 missed still gets a row.
 
 | week | expected | missed | cause |
 |---|---|---|---|
-| 2026-09-14 → 09-18 | 125 (night checks went live Mon 09-14 16:24 ET, so the first slot was 16:45; a full week is 155) | 0 | — |
+| 2026-09-14 → 09-18 | 125: 155 minus the 30 slots before night checks went live on Mon 09-14 at 16:24 ET (Sun 12 + Mon pre-open 18). The first slot was Mon 16:45 | 0 | — |
 | 2026-09-20 → 09-25 (open) | 155 | 1 | Mon 09-21 04:15 ET: yfinance returned nothing for `ES=F` and `NQ=F` and the Finnhub news poll timed out in the same seconds. Host network blip, no action (`docs/decisions.md` 2026-09-21). |
 
 To count a week, run this read-only query on prod (replace the two dates):
@@ -138,3 +146,11 @@ GROUP BY 1 ORDER BY min(checked_at);
 ```
 
 A full day has Sun 12, Mon–Thu 31 and Fri 19 rows. A day short of that is missing slots; list them before recording a cause.
+
+### Market / settle slots
+
+Market checks run every 5 min from the XNYS open to the close, plus the 16:20 ET settle. There is no catch-up: a missed settle breaks the next day's trend, which is why prod risk-shield rebuilds go outside XNYS hours (the G15 timing rule in `CLAUDE.md`). Record every missed market or settle slot here.
+
+| date | slot (ET) | kind | cause |
+|---|---|---|---|
+| Mon 2026-09-14 | 16:20 | settle | risk-shield deploy restart, pre-G15. The container started at 16:24:28 ET and the scheduler logged `Missed 1 health check slot(s) up to 2026-09-14T20:20:00+00:00 (woke 268s after that slot)`. |
