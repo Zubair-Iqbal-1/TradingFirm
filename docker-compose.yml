@@ -239,10 +239,11 @@ services:
       # cache_control on the verdict's system block. Off until the live check
       # shows the prefix clears Sonnet 5's 1,024-token minimum (spec 4.4 d.12).
       LLM_VERDICT_CACHE: ${LLM_VERDICT_CACHE:-false}
-      # Empty = OpenRouter's normal routing. Set in .env (e.g. anthropic) to
-      # pin every request to the listed host(s) with no fallback: a prompt
-      # cache is per host. Not carried by ai-agent-dev.
-      LLM_PROVIDER_ORDER: ${LLM_PROVIDER_ORDER:-}
+      # Which OpenRouter host(s) to try first, comma-separated, because a
+      # prompt cache is per host. A preference, never a pin: the request always
+      # allows fallbacks, and ai.llm_calls.host records who really served it.
+      # No .env line is needed; the default here is the code's default.
+      LLM_PROVIDER_ORDER: ${LLM_PROVIDER_ORDER:-anthropic}
     restart: unless-stopped
 
   # Dev/test twin of ai-agent (Part 4.1), the same shape Part 3.1 gave
