@@ -63,3 +63,46 @@ def test_migration_007_matches_the_columns_db_py_writes(sql):
     for outcome in ("ok", "rate_limited", "unavailable", "rejected", "refused",
                     "bad_response", "auth_failed"):
         assert f"'{outcome}'" in calls
+
+
+# ── Part 4.5: 008_journal.sql, and 007 frozen ────────────────────
+
+# 007 is applied on prod (2026-09-21). A change to it would never reach prod
+# (migrate.sh keys schema_migrations by filename), so it must never change:
+# new columns go in a new file.
+MIGRATION_007_SHA256 = "73e378642ef5ac686bb67f7b3bd31646f52ef85e38ee1404ca332853bfca19dd"
+
+
+def _raw(filename):
+    path = os.path.join(MIGRATIONS_DIR, filename)
+    if not os.path.exists(path):
+        pytest.skip(f"{path} not mounted (run inside tf-ai-agent-dev)")
+    with open(path, "rb") as fh:
+        return fh.read()
+
+
+@pytest.fixture(scope="module")
+def sql008():
+    text = _raw("008_journal.sql").decode("utf-8")
+    return "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("--"))
+
+
+def test_migration_007_is_frozen():
+    import hashlib
+    assert hashlib.sha256(_raw(FILENAME)).hexdigest() == MIGRATION_007_SHA256
+
+
+def test_migration_008_is_rerunnable(sql008):
+    statements = [s.strip() for s in sql008.split(";") if s.strip()]
+    assert len(statements) == 4
+    for statement in statements:
+        assert statement.startswith("ALTER TABLE ai.verdict_outcomes ADD COLUMN IF NOT EXISTS "), statement
+        assert "NOT NULL" not in statement, "nullable: a plan-less verdict leaves columns NULL"
+    assert not re.search(r"\b(DROP|TRUNCATE|DELETE|UPDATE|INSERT|CREATE)\b", sql008)
+
+
+def test_migration_008_adds_the_four_journal_columns(sql008):
+    assert re.search(r"session_date DATE;", sql008)
+    assert re.search(r"first_hit TEXT\s+CHECK \(first_hit IN \('stop', 'target', 'same_bar'\)\);", sql008)
+    assert re.search(r"r_multiple NUMERIC\(8,3\);", sql008)
+    assert re.search(r"ask_session_bars SMALLINT\s+CHECK \(ask_session_bars >= 0\);", sql008)
