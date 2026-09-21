@@ -244,6 +244,11 @@ services:
       # allows fallbacks, and ai.llm_calls.host records who really served it.
       # No .env line is needed; the default here is the code's default.
       LLM_PROVIDER_ORDER: ${LLM_PROVIDER_ORDER:-anthropic}
+      # Part 4.5: the journal scorer, 17:30 ET on XNYS sessions. It refreshes
+      # due tickers through data-engine (yfinance behind it), at most 20 a
+      # night, 5 s apart. The prod scheduled writer: no `up -d ai-agent`
+      # between 17:25 and 18:15 ET.
+      JOURNAL_SCORING_ENABLED: "true"
     restart: unless-stopped
 
   # Dev/test twin of ai-agent (Part 4.1), the same shape Part 3.1 gave
@@ -264,6 +269,8 @@ services:
   #                                     reach prod's news_items (4.2)
   #   RISK_SHIELD_URL=risk-shield-dev → /analyze never reads prod's regime
   #                                     rows (4.4); test_twin_never_calls_prod_risk_shield
+  #   JOURNAL_SCORING_ENABLED=false → no nightly scorer on the twin (4.5);
+  #                                   test_twin_never_scores_on_a_schedule
   # test_twin_never_calls_openrouter asserts the five LLM locks and
   # test_twin_never_writes_prod_data_engine the last one. Never drop them.
   # No depends_on on purpose: tests mock Postgres/Redis and open no socket.
@@ -291,6 +298,7 @@ services:
       DATA_ENGINE_URL: http://data-engine-dev:8001  # hard-coded: never prod's news_items (4.2)
       RISK_SHIELD_URL: http://risk-shield-dev:8003  # hard-coded: never prod's risk-shield (4.4)
       LLM_VERDICT_CACHE: "false"
+      JOURNAL_SCORING_ENABLED: "false"              # hard-coded: no scheduled scorer on the twin (4.5)
     command: uvicorn main:app --host 0.0.0.0 --port 8004 --reload
     restart: "no"
 
