@@ -78,7 +78,8 @@ One JSON document between two `<data-…>` tags, holding:
   someone watching the stock could tell when one has happened.
 - `riskFlags` — 0 to 7 short labels, each at most 90 characters: earnings
   close, weak regime, missing data, thin news, embedded instructions, and
-  the like.
+  the like. When `plan` is null, the "no plan" flag with its reason is added
+  by code; do not add your own.
 
 When `plan` is present you also return:
 

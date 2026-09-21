@@ -359,6 +359,10 @@ def test_labelled_headlines_are_never_resent(app):
     assert world.writes[0][1]["eventKey"] == "aapl-story-0"
 
     rows = state.db_pool.ledger()
+    # Stamped at write time: the classifier's row sorts before its verdict's
+    # (the first live call had them backwards, the verdict at request start).
+    assert rows[0]["called_at"] < rows[1]["called_at"]
+    assert rows == sorted(rows, key=lambda r: r["called_at"])
     assert [(r["label"], r["route"], r["counters"]) for r in rows] == [
         ("headline_classify", "analyze", ["llm_calls", "classifier_calls"]),
         ("verdict", "analyze", ["llm_calls"])]

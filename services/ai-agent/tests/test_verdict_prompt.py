@@ -269,3 +269,32 @@ def test_price_move_of_one_atr_invalidates():
     assert same == analyze.fingerprint(**BASE) and moved != same
     for bad_atr in (None, 0, -1, float("nan"), "x"):
         assert analyze.price_bucket(50, entry, bad_atr) is None
+
+
+# ── The no-plan flag belongs to the code ─────────────────────────
+
+@pytest.mark.parametrize("echo", ["no_plan_low_r", "plan_null_low_r", "No plan: low R",
+                                  "no plan available", "plan rejected (low_r)"])
+def test_model_no_plan_flag_is_not_duplicated(echo):
+    """Both live AAPL answers carried one beside the code's."""
+    answer = {k: v for k, v in ANSWER.items()
+              if k not in ("invalidation", "holdThroughEarnings", "horizonDays")}
+    answer.update(verdict="avoid", riskFlags=[echo, "earnings_in_hold_window", "regime_cautious"])
+    verdict = analyze.merge(answer, PlanRejected("low_r", "best R 0.19 < 1.5"), 37)
+    assert verdict.risk_flags == ["no plan: low_r", "earnings_in_hold_window", "regime_cautious"]
+
+
+def test_other_flags_about_the_plan_are_kept():
+    answer = {k: v for k, v in ANSWER.items()
+              if k not in ("invalidation", "holdThroughEarnings", "horizonDays")}
+    answer.update(verdict="wait", riskFlags=["plan needs a pullback to support", "low_relevance_news"])
+    verdict = analyze.merge(answer, PlanRejected("low_r", "d"), None)
+    assert verdict.risk_flags == ["no plan: low_r", "plan needs a pullback to support",
+                                  "low_relevance_news"]
+    # With a plan there is no code flag, so nothing is filtered.
+    kept = analyze.merge({**ANSWER, "riskFlags": ["no plan b if earnings miss"]}, plan_a(), 38)
+    assert kept.risk_flags == ["no plan b if earnings miss"]
+
+
+def test_prompt_says_the_no_plan_flag_is_the_codes():
+    assert "is added\n  by code; do not add your own" in prompts.load(prompts.VERDICT, reload=True)

@@ -236,8 +236,11 @@ async def run(state, settings, ticker: str, horizon: str, entry: Optional[float]
             dossier, macro, grouped, plan, entry=resolved, entry_source=entry_source,
             today=today, news_classified=news["ok"],
         )
+        # No `now` here: every ledger row is stamped when it is written, so a
+        # request's rows sort in the order the calls happened (the classifier's
+        # before the verdict's). The request's own time is ai.verdicts.asked_at.
         ledger_kw = dict(route=ledger.ROUTE_ANALYZE, label=analyze.LABEL, model=settings.llm_model,
-                         counters=[cache.STATE_LLM_CALLS], ticker=ticker, user_id=user_id, now=now)
+                         counters=[cache.STATE_LLM_CALLS], ticker=ticker, user_id=user_id)
 
         # 11. the verdict call ────────────────────────────────────
         try:

@@ -18,6 +18,7 @@ import hashlib
 import json
 import logging
 import math
+import re
 import secrets
 from datetime import date, datetime
 from decimal import ROUND_HALF_UP, Decimal
@@ -314,6 +315,21 @@ def _texts(value: Any, limit: int, name: str) -> list[str]:
     return [_text(v, limit, f"{name}[{i}]") for i, v in enumerate(value)]
 
 
+def _words(text: str) -> list[str]:
+    return re.sub(r"[^a-z0-9]+", " ", text.lower()).split()
+
+
+def _echoes_no_plan(flag: str, reason: str) -> bool:
+    """True for a model-written flag that only restates the code's
+    `no plan: <reason>`: it talks about the plan and either says "no plan"
+    or names the rejection reason. Anything else about the plan is kept."""
+    words = _words(flag)
+    if "plan" not in words:
+        return False
+    text, why = " ".join(words), " ".join(_words(reason))
+    return "no plan" in text or why in text
+
+
 def merge(answer: dict, plan: Union[PlanMath, PlanRejected], earnings_in_days: Optional[int]) -> Verdict:
     """The model's judgement plus plan math's numbers, as one validated
     Verdict. An over-long string is trimmed (4.2's oneLine precedent); every
@@ -344,7 +360,9 @@ def merge(answer: dict, plan: Union[PlanMath, PlanRejected], earnings_in_days: O
     else:
         if answer.get("verdict") == "go":
             raise VerdictRejected("go without a plan")
-        flags = [f"no plan: {plan.reason}"] + flags
+        # The code owns this flag (the prompt says so). A model that adds its
+        # own anyway ("no_plan_low_r", "plan_null_low_r") is not shown twice.
+        flags = [f"no plan: {plan.reason}"] + [f for f in flags if not _echoes_no_plan(f, plan.reason)]
         flags = flags[:verdict_model.RISK_FLAGS_MAX]
 
     confidence = answer.get("confidence")
