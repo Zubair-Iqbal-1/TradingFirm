@@ -154,3 +154,17 @@ Market checks run every 5 min from the XNYS open to the close, plus the 16:20 ET
 | date | slot (ET) | kind | cause |
 |---|---|---|---|
 | Mon 2026-09-14 | 16:20 | settle | risk-shield deploy restart, pre-G15. The container started at 16:24:28 ET and the scheduler logged `Missed 1 health check slot(s) up to 2026-09-14T20:20:00+00:00 (woke 268s after that slot)`. |
+
+## Analyst settings (Part 4.4)
+
+Migration `007_ai.sql` seeds the development user with `account_size = NULL`: this repository is public, so the number never goes into a migration, a commit or a chat. Until it is set, `POST /analyze/{ticker}` answers `409 settings missing`. Set it once, by hand, after 007 is applied (replace `<ACCOUNT_SIZE>`; `risk_per_trade_pct` is a percent, 1.0 = 1 %):
+
+```bash
+docker exec -it tf-postgres bash -c 'PGUSER="$POSTGRES_USER" PGPASSWORD="$POSTGRES_PASSWORD" psql -d "$POSTGRES_DB" -c "UPDATE users.settings SET account_size = <ACCOUNT_SIZE>, risk_per_trade_pct = 1.0, updated_at = now() WHERE user_id = '"'"'00000000-0000-4000-8000-000000000001'"'"';"'
+```
+
+A change takes effect on the next analyze: account size and risk % are part of the verdict cache's fingerprint, so a cached verdict sized for the old numbers is not served. The account size is never sent to the model and never logged; the prompt carries the plan's levels and R only.
+
+### A verdict that was paid for but not stored
+
+If Postgres fails after the model answered, `/analyze` still returns the verdict with `stored: false`, and `tf-ai-agent` logs one ERROR line starting `VERDICT NOT STORED`, followed by a JSON payload `{"verdict": {...}, "llmCall": {...}}`. Its keys are the columns of `ai.verdicts` and `ai.llm_calls`. To backfill (D5: every verdict is stored): insert the `verdict` object into `ai.verdicts`, take the returned `id`, and insert `llmCall` into `ai.llm_calls` with that `verdict_id`. `GET /usage` shows `ledgerMissedToday > 0` on a day this happened.
