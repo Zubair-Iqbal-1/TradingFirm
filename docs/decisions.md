@@ -994,3 +994,23 @@ On all four pre-expiry nights the 00:15 reading sat at ES −0.85…−0.95 / NQ
 **Why:** the route is the live check; the classifier needed a script only because its headlines were made up.
 
 **Supersedes:** the open question in 2026-09-21 "live scripts cannot run from the prod image (open for 4.8)".
+
+---
+
+## 2026-09-21 — `LLM_PROVIDER_ORDER` pins OpenRouter's host, with no fallback
+
+**Decision:** optional, default empty = normal routing and an unchanged request. Set, every request carries `provider: {"order": [...], "allow_fallbacks": false}`. Prod's `.env` sets `anthropic`; the twin never carries it. A malformed value is refused pre-flight.
+
+**Why:** a prompt cache is per host, and standard routing moves between five, so a cache written on one call is rarely read on the next. The cost: with the host down, a call fails (`LLMUnavailable`) instead of rerouting.
+
+**Supersedes:** nothing.
+
+---
+
+## 2026-09-21 — The one repair allowed on a model answer is length
+
+**Decision:** a verdict string over its cap is cut at the cap, with a WARNING. Length only, never content; every other contract break rejects the answer whole. Spec 4.4's must-not names it as the single exception, with `test_over_long_strings_are_trimmed_not_rejected`.
+
+**Why:** a paid verdict thrown away for a 310-character bullet helps nobody, and 4.2 already trims `oneLine`. Naming it keeps "never repaired" true everywhere else.
+
+**Supersedes:** nothing.
