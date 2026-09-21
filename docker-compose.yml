@@ -233,6 +233,12 @@ services:
       # 60 of the global 100 stay free for verdicts and the macro brief.
       LLM_CLASSIFIER_DAILY_CALL_CAP: ${LLM_CLASSIFIER_DAILY_CALL_CAP:-40}
       DATA_ENGINE_URL: http://data-engine:8001
+      # Part 4.4: /analyze reads the regime (and the macro brief, once 4.6
+      # writes one) from risk-shield. Fail-open on its side.
+      RISK_SHIELD_URL: http://risk-shield:8003
+      # cache_control on the verdict's system block. Off until the live check
+      # shows the prefix clears Sonnet 5's 1,024-token minimum (spec 4.4 d.12).
+      LLM_VERDICT_CACHE: ${LLM_VERDICT_CACHE:-false}
     restart: unless-stopped
 
   # Dev/test twin of ai-agent (Part 4.1), the same shape Part 3.1 gave
@@ -251,6 +257,8 @@ services:
   #                                          or prod's cache keys
   #   DATA_ENGINE_URL=data-engine-dev → the classifier's write-back can never
   #                                     reach prod's news_items (4.2)
+  #   RISK_SHIELD_URL=risk-shield-dev → /analyze never reads prod's regime
+  #                                     rows (4.4); test_twin_never_calls_prod_risk_shield
   # test_twin_never_calls_openrouter asserts the five LLM locks and
   # test_twin_never_writes_prod_data_engine the last one. Never drop them.
   # No depends_on on purpose: tests mock Postgres/Redis and open no socket.
@@ -265,6 +273,7 @@ services:
       - "8014:8004"
     volumes:
       - ./services/ai-agent:/app
+      - ./infra/supabase/migrations:/migrations:ro   # read-only, for tests that assert migration text
     environment:
       SERVICE_NAME: ai-agent-dev
       SERVICE_PORT: "8004"
@@ -275,6 +284,8 @@ services:
       LLM_BASE_URL: http://openrouter.invalid/api/v1  # hard-coded: .invalid never resolves (4.1)
       LLM_CLASSIFIER_DAILY_CALL_CAP: "0"            # hard-coded 0: the classifier refuses too (4.2)
       DATA_ENGINE_URL: http://data-engine-dev:8001  # hard-coded: never prod's news_items (4.2)
+      RISK_SHIELD_URL: http://risk-shield-dev:8003  # hard-coded: never prod's risk-shield (4.4)
+      LLM_VERDICT_CACHE: "false"
     command: uvicorn main:app --host 0.0.0.0 --port 8004 --reload
     restart: "no"
 
