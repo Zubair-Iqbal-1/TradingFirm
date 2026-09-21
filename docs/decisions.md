@@ -900,3 +900,27 @@ On all four pre-expiry nights the 00:15 reading sat at ES −0.85…−0.95 / NQ
 **Why:** a deploy that silently changes nothing is worse than one that fails, because the report then describes code that isn't running.
 
 **Supersedes:** the `up -d data-engine` line in spec 4.2's "Waiting for a go" list, and the invocation in spec 4.2 decision 14.
+
+---
+
+## 2026-09-21 — Plan math conventions (Part 4.3)
+
+**Decision:** `grading/plan_math.py` corrects plan row 4.3 in four places:
+- **`entry` is a plan field.** The row's plan has none, and R cannot be checked without it.
+- **A target is the resistance zone's `low`, floored to the cent**, not its mean price: the first price where resistance starts.
+- **Size is the smallest of three bounds:** risk sizing (the row's formula), max position `floor(account × 25 % ÷ entry)`, and cash `floor(account ÷ entry)`. `size_basis` names the one that applied. Without them, 10,000 at 2 % risk with a stop 0.15 away sizes 1,333 shares at 50 = 66,650. At 25 % the cash cap cannot bind; it is there in case `MAX_POSITION_PCT` is raised above 100.
+- **Numbers become `Decimal(str(x))` before any arithmetic.** In float, 47.80 − 1.20 floors to 46.59.
+
+**Why:** D11 says sizing bounds gap losses, and a position larger than the account bounds nothing.
+
+**Supersedes:** plan row 4.3's plan field list and its single-formula size.
+
+---
+
+## 2026-09-21 — Open gap: no plan at an all-time high (Part 4.3)
+
+**Gap:** `compute_plan` rejects with `no_target` when no zone sits above the entry, so a stock at an all-time high, a common swing breakout, gets no plan. A measured-move or ATR-multiple target would close it, but that part isn't scoped.
+
+**Why open:** it would be the first price level not taken from a zone, and 4.4's prompt rule is "never invent price levels".
+
+**Supersedes:** nothing.
