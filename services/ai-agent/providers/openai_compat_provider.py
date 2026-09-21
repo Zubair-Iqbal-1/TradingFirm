@@ -151,25 +151,14 @@ def _retry_after_seconds(raw: Any, default: int) -> int:
     return min(seconds, config.LLM_COOLDOWN_MAX)
 
 
-# One provider slug as OpenRouter writes them ("anthropic", "google-vertex",
-# "amazon-bedrock/us"): a charset that cannot carry anything but a name.
-_PROVIDER_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9._/-]{0,63}$")
-
-
-def provider_routing(order: str) -> Optional[dict]:
-    """The request's `provider` object for LLM_PROVIDER_ORDER, or None when
-    the setting is explicitly empty. `allow_fallbacks` is ALWAYS true and
-    there is no setting that makes it false: the order is a preference, so a
-    host that is down costs a cache miss, never a failed call. Raises
-    ValueError on a malformed slug — pre-flight step 1, so a bad setting
-    sends nothing and reserves nothing."""
-    if not isinstance(order, str) or not order.strip():
-        return None
-    slugs = [part.strip().lower() for part in order.split(",") if part.strip()]
-    for slug in slugs:
-        if not _PROVIDER_SLUG_RE.match(slug):
-            raise ValueError("LLM_PROVIDER_ORDER must be provider slugs, comma-separated")
-    return {"order": slugs, "allow_fallbacks": True}
+def provider_routing(order: str) -> dict:
+    """The request's `provider` object, on every request, always.
+    `allow_fallbacks` is ALWAYS true and nothing makes it false: the order is
+    a preference, so a host that is down costs a cache miss, never a failed
+    call. Settings already refused an empty or malformed order at startup;
+    parsing it again here means a value that got past that (a test, a
+    mutated settings object) still cannot reach the wire."""
+    return {"order": config.parse_provider_order(order), "allow_fallbacks": True}
 
 
 HOST_MAX = 100
@@ -192,11 +181,11 @@ def host_slug(host: str) -> str:
     return "-".join(host.lower().split())
 
 
-def is_fallback(host: Optional[str], routing: Optional[dict]) -> bool:
+def is_fallback(host: Optional[str], routing: dict) -> bool:
     """True when a host was reported and it is not the first one asked for.
     An order entry may carry a region ("amazon-bedrock/us"); the host name
     never does, so only the part before the slash is compared."""
-    if not host or not routing or not routing.get("order"):
+    if not host:
         return False
     return host_slug(host) != routing["order"][0].split("/")[0]
 
@@ -367,13 +356,10 @@ class OpenAICompatProvider(LLMProvider):
                 "json_schema": {"name": label, "schema": schema, "strict": True},
             },
         }
-        extra_body: dict[str, Any] = {}
+        extra_body: dict[str, Any] = {"provider": routing}
         if send_effort is not None:
             extra_body["reasoning"] = {"effort": send_effort}
-        if routing is not None:
-            extra_body["provider"] = routing
-        if extra_body:
-            request["extra_body"] = extra_body
+        request["extra_body"] = extra_body
         headers = self._headers()
         if headers is not None:
             request["extra_headers"] = headers

@@ -728,19 +728,23 @@ def test_allow_fallbacks_is_always_true(order):
     assert '"allow_fallbacks": False' not in inspect.getsource(module)
 
 
-@pytest.mark.asyncio
-async def test_explicitly_empty_order_sends_no_provider_object():
-    wire = Wire(ok())
-    await call(make(wire, redis=FakeRedis(), llm_provider_order=""), model=HAIKU)
-    assert set(wire.body) == {"model", "max_tokens", "messages", "response_format"}
+@pytest.mark.parametrize("bad", ["", "   ", ",", "anthropic,", "anthropic; drop", "a b",
+                                 "../x", "{}", "anthropic!"])
+def test_empty_or_malformed_provider_order_is_refused_at_startup(bad):
+    """A config error, not an opt-out: Settings will not construct, so the
+    service will not boot, and there is no request without the field."""
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError) as info:
+        make(llm_provider_order=bad)
+    assert "LLM_PROVIDER_ORDER" in str(info.value)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("bad", ["anthropic; drop", "a b", "../x", "{}", "anthropic!"])
-async def test_malformed_provider_order_is_refused_before_http(bad):
-    wire, r = Wire(ok()), FakeRedis()
+async def test_an_order_that_got_past_settings_still_never_reaches_the_wire():
+    provider = make(wire := Wire(ok()), redis=(r := FakeRedis()))
+    object.__setattr__(provider._settings, "llm_provider_order", "")
     with pytest.raises(ValueError):
-        await call(make(wire, redis=r, llm_provider_order=bad))
+        await call(provider)
     assert wire.requests == [] and r.store == {}, "nothing sent, nothing reserved"
 
 

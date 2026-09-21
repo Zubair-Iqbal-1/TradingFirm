@@ -114,6 +114,16 @@ def test_analyze_defaults():
     assert fields["llm_provider_order"].default == "anthropic"
 
 
+def test_provider_order_is_normalized_and_an_empty_one_refuses_to_boot(monkeypatch):
+    from pydantic import ValidationError
+    assert Settings(llm_provider_order=" Google-Vertex , anthropic ").llm_provider_order == \
+        "google-vertex,anthropic"
+    assert Settings().llm_provider_order == "anthropic"
+    monkeypatch.setenv("LLM_PROVIDER_ORDER", "")
+    with pytest.raises(ValidationError):
+        Settings()
+
+
 def test_classifier_cap_default_is_smaller_than_the_global_one():
     """Declared defaults, read from the model rather than from this env —
     the twin hard-codes both caps to 0. Spec 4.2 gate ii: ~400 unique

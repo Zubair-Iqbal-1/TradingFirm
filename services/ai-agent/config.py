@@ -11,7 +11,9 @@ OpenRouter. Models are env knobs, so Anthropic and Z.ai ids are reachable
 through the same key.
 """
 
-from pydantic import AliasChoices, Field, SecretStr
+import re
+
+from pydantic import AliasChoices, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings
 
 # Hard bound on any single dependency connection attempt at startup, in
@@ -27,6 +29,25 @@ LLM_COOLDOWN_MAX = 3600
 # Cooldown after 401 / 402 / 403. An hour, because none of the three clears
 # on its own: the key is wrong, or the account is out of credits.
 LLM_COOLDOWN_AUTH = 3600
+
+# One OpenRouter provider slug ("anthropic", "google-vertex",
+# "amazon-bedrock/us"): a charset that cannot carry anything but a name.
+PROVIDER_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9._/-]{0,63}$")
+
+
+def parse_provider_order(value) -> list[str]:
+    """LLM_PROVIDER_ORDER as a list, in order. ValueError when it is empty or
+    holds anything that is not a slug: the provider object rides on every
+    request, so there is no "unset" to fall back to."""
+    if not isinstance(value, str):
+        raise ValueError("LLM_PROVIDER_ORDER must be a string")
+    slugs = [part.strip().lower() for part in value.split(",")]
+    if not value.strip() or any(not PROVIDER_SLUG_RE.match(slug) for slug in slugs):
+        raise ValueError(
+            "LLM_PROVIDER_ORDER must be one or more OpenRouter provider slugs, "
+            "comma-separated (e.g. anthropic); it cannot be empty"
+        )
+    return slugs
 
 
 class Settings(BaseSettings):
@@ -102,8 +123,14 @@ class Settings(BaseSettings):
     # exists because a prompt cache is per host, and unordered routing across
     # five hosts rarely reads what it wrote. The host that actually served
     # each call is stored in ai.llm_calls.host, and a fallback is a WARNING.
-    # An explicitly empty value sends no provider object at all.
+    # Empty or malformed is a config error and the service refuses to start:
+    # there is no way to switch the provider object off.
     llm_provider_order: str = "anthropic"
+
+    @field_validator("llm_provider_order")
+    @classmethod
+    def _provider_order_is_slugs(cls, value: str) -> str:
+        return ",".join(parse_provider_order(value))
 
     # OpenRouter app attribution. Sent as HTTP-Referer / X-Title only when
     # non-empty; never a hard-coded value.
