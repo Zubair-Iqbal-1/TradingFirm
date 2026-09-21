@@ -260,3 +260,301 @@ async def test_expired_horizon_is_never_refreshed():
     # +20 targets 10-19; 11-02 is 10 sessions after it (still due), 11-03 is 11.
     got = await run(state_for(pool, engine), datetime(2026, 11, 3, 17, 30, tzinfo=ET))
     assert got["expired"] == 3 and got["due"] == 0 and engine.calls == []
+
+
+# ── Refresh answers ──────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_cooldown_429_requeues_once_never_fresh():
+    pool = JournalPool([verdict("AAA", 1), verdict("BBB", 2), verdict("CCC", 3)])
+    engine = DataEngine(refresh={"AAA": ["cooldown", "cooldown"], "CCC": ["cooldown", "ok"]})
+    got = await run(state_for(pool, engine))
+    assert engine.refreshes() == ["AAA", "BBB", "CCC", "AAA", "CCC"]
+    assert pool.rows_for("AAA") == {}, "a cooldown is never read as fresh bars"
+    assert len(pool.rows_for("BBB")) == 2 and len(pool.rows_for("CCC")) == 2
+    assert got["requeued"] == 2 and got["skipped"] == 1 and got["stoppedBy"] is None
+    assert not [c for c in engine.calls if c[0] == "bars" and c[1] == "AAA"]
+
+
+@pytest.mark.asyncio
+async def test_first_blank_answer_skips_ticker():
+    redis = FakeRedis()
+    pool = JournalPool([verdict("DEAD", 1), verdict("LIVE", 2)])
+    engine = DataEngine(refresh={"DEAD": ["blank"]})
+    got = await run(state_for(pool, engine, redis))
+    assert engine.refreshes() == ["DEAD", "LIVE"] and got["stoppedBy"] is None
+    assert len(pool.rows_for("LIVE")) == 2 and pool.rows_for("DEAD") == {}
+    assert redis.sets[runner.BLANKED_KEY] == {"DEAD"} and redis.ttl[runner.BLANKED_KEY] == 604800
+
+
+@pytest.mark.asyncio
+async def test_second_blank_answer_stops_the_night():
+    redis = FakeRedis()
+    pool = JournalPool([verdict("AAA", 1), verdict("BBB", 2), verdict("CCC", 3)])
+    engine = DataEngine(refresh={"AAA": ["blank"], "BBB": ["blank"]})
+    got = await run(state_for(pool, engine, redis))
+    assert engine.refreshes() == ["AAA", "BBB"], "CCC is never refreshed"
+    assert got["stoppedBy"].startswith("BBB") and got["deferred"] == 1
+    assert redis.sets[runner.BLANKED_KEY] == {"AAA", "BBB"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer", [
+    httpx.Response(429, json={"detail": "Rate limited by data provider."}),
+    httpx.Response(502, json={"detail": "Data provider error"}),
+    httpx.Response(503, json={"detail": "Database unavailable"}),
+    httpx.ReadTimeout("slow"),
+    httpx.ConnectError("refused"),
+], ids=["429-no-retry-after", "502", "503", "timeout", "connect"])
+async def test_refresh_failure_stops_the_night(answer):
+    redis = FakeRedis()
+    pool = JournalPool([verdict("AAA", 1), verdict("BBB", 2), verdict("CCC", 3)])
+    engine = DataEngine(refresh={"BBB": [answer]})
+    got = await run(state_for(pool, engine, redis))
+    assert engine.refreshes() == ["AAA", "BBB"]
+    assert len(pool.rows_for("AAA")) == 2 and pool.rows_for("BBB") == {} == pool.rows_for("CCC")
+    assert got["stoppedBy"].startswith("BBB:") and got["deferred"] == 1
+    assert redis.sets[runner.BLANKED_KEY] == {"BBB"}, "the stopper runs last next night"
+
+
+@pytest.mark.asyncio
+async def test_av_cooldown_in_refresh_never_stops_the_night():
+    """data-engine's AV refusal lives in earningsDates.reason; the bars are there."""
+    av = httpx.Response(200, json={"ticker": "AAA", "dailyBars": 502, "hourlyBars": 455,
+                                   "earningsDates": {"source": None, "stored": 0, "dropped": 0,
+                                                     "reason": "cooldown"}})
+    pool = JournalPool([verdict("AAA", 1), verdict("BBB", 2)])
+    engine = DataEngine(refresh={"AAA": [av]})
+    got = await run(state_for(pool, engine))
+    assert got["stoppedBy"] is None and got["refreshed"] == 2
+    assert len(pool.rows_for("AAA")) == 2
+
+
+# ── Order ────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_blanked_tickers_go_last_next_night():
+    redis = FakeRedis()
+    redis.sets[runner.BLANKED_KEY] = {"AAA"}
+    pool = JournalPool([verdict("AAA", 1), verdict("BBB", 2), verdict("CCC", 3)])
+    engine = DataEngine()
+    await run(state_for(pool, engine, redis))
+    assert engine.refreshes() == ["BBB", "CCC", "AAA"]
+
+
+@pytest.mark.asyncio
+async def test_blanked_redis_down_plain_order():
+    redis = FakeRedis(broken=True)
+    pool = JournalPool([verdict("AAA", 1), verdict("BBB", 2)])
+    engine = DataEngine(refresh={"AAA": ["blank"]})
+    got = await run(state_for(pool, engine, redis))
+    assert engine.refreshes() == ["AAA", "BBB"] and len(pool.rows_for("BBB")) == 2
+    assert got["stoppedBy"] is None
+
+
+@pytest.mark.asyncio
+async def test_three_dead_tickers_do_not_starve_the_rest():
+    """With one remembered ticker, three dead ones would rotate (A+B stop
+    night 1, A+C night 2 …) ahead of everything. With the set, every dead
+    ticker runs behind the healthy ones."""
+    redis = FakeRedis()
+    dead = {"DA": ["blank"] * 5, "DB": ["blank"] * 5, "DC": ["blank"] * 5}
+    pool = JournalPool([verdict("DA", 1), verdict("DB", 2), verdict("DC", 3),
+                        verdict("HA", 4), verdict("HB", 5)])
+    engine = DataEngine(refresh=dead)
+    state = state_for(pool, engine, redis)
+
+    night1 = await run(state)
+    assert engine.refreshes() == ["DA", "DB"] and night1["stoppedBy"].startswith("DB")
+    engine.calls.clear()
+    night2 = await run(state)
+    assert engine.refreshes() == ["DC", "HA", "HB", "DA"], "healthy before the known dead"
+    assert len(pool.rows_for("HA")) == 2 and len(pool.rows_for("HB")) == 2
+    assert redis.sets[runner.BLANKED_KEY] == {"DA", "DB", "DC"}
+    # A new healthy verdict now runs ahead of all three dead tickers.
+    pool.verdicts.append(verdict("HC", 6))
+    engine.calls.clear()
+    await run(state)
+    assert engine.refreshes()[0] == "HC" and len(pool.rows_for("HC")) == 2
+
+
+# ── Pacing ───────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_one_refresh_per_ticker():
+    pool = JournalPool([verdict("AAA", 1), verdict("AAA", 2, plan=None)])
+    engine = DataEngine()
+    got = await run(state_for(pool, engine))
+    assert engine.refreshes() == ["AAA"] and got["scored"] == 4
+
+
+@pytest.mark.asyncio
+async def test_attempt_cap_includes_retries():
+    names = [f"T{chr(65 + i // 26)}{chr(65 + i % 26)}" for i in range(20)]
+    pool = JournalPool([verdict(t, i + 1) for i, t in enumerate(names)])
+    engine = DataEngine(refresh={names[0]: ["cooldown", "ok"]})
+    got = await run(state_for(pool, engine))
+    assert len(engine.refreshes()) == runner.MAX_ATTEMPTS == 20
+    assert got["deferred"] == 1 and engine.refreshes().count(names[0]) == 1
+
+
+@pytest.mark.asyncio
+async def test_refreshes_are_spaced():
+    sleeps = []
+    pool = JournalPool([verdict("AAA", 1), verdict("BBB", 2), verdict("CCC", 3)])
+    await run(state_for(pool, DataEngine()), sleeps=sleeps)
+    assert sleeps == [5, 5], "5 s between refreshes, none before the first"
+
+
+@pytest.mark.asyncio
+async def test_run_stops_at_deadline():
+    pool = JournalPool([verdict("AAA", 1), verdict("BBB", 2), verdict("CCC", 3)])
+    engine = DataEngine()
+    start = datetime(2026, 9, 28, 18, 8, tzinfo=ET)
+    got = await run(state_for(pool, engine), clock=Clock(start, step=timedelta(minutes=1)),
+                    deadline=sessions.deadline_at(date(2026, 9, 28)))
+    # Readings: 18:08 (select), 18:09 (AAA starts), 18:10 → deadline.
+    assert engine.refreshes() == ["AAA"]
+    assert got["stoppedBy"] == "deadline" and got["deferred"] == 2
+
+
+# ── Bars ─────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_bars_read_failure_skips_ticker():
+    pool = JournalPool([verdict("AAA", 1), verdict("BBB", 2)])
+    engine = DataEngine(bars={("AAA", "1d"): httpx.Response(503)})
+    got = await run(state_for(pool, engine))
+    assert pool.rows_for("AAA") == {} and len(pool.rows_for("BBB")) == 2
+    assert got["skipped"] == 1 and got["stoppedBy"] is None
+
+
+@pytest.mark.asyncio
+async def test_missing_session_bar_leaves_horizon_unscored(caplog):
+    pool = JournalPool([verdict()])
+    engine = DataEngine(bars={("AAPL", "1d"): daily_bars(skip={date(2026, 9, 25)})})
+    await run(state_for(pool, engine))
+    assert set(h for _, h in pool.rows_for("AAPL")) == {1}, "+5 needs 09-25"
+    assert "2026-09-25" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_missing_middle_hour_still_scores(caplog):
+    asked = datetime(2026, 9, 21, 10, 5, tzinfo=ET)          # starts 10:30 … 15:30: six
+    gap = datetime(2026, 9, 21, 12, 30, tzinfo=ET)
+    pool = JournalPool([verdict(asked=asked)])
+    engine = DataEngine(bars={("AAPL", "1h"): hourly_bars(skip={gap})})
+    await run(state_for(pool, engine))
+    rows = pool.rows_for("AAPL")
+    assert len(rows) == 2 and all(r["ask_session_bars"] == 5 for r in rows.values())
+    assert gap.astimezone(timezone.utc).isoformat() in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_no_hourly_bars_when_expected_defers():
+    pool = JournalPool([verdict()])
+    engine = DataEngine(bars={("AAPL", "1h"): []})
+    got = await run(state_for(pool, engine))
+    assert pool.rows_for("AAPL") == {} and got["skipped"] == 1
+    # Asked after the last hourly start: none expected, so none needed.
+    late = JournalPool([verdict(asked=datetime(2026, 9, 21, 15, 45, tzinfo=ET))])
+    await run(state_for(late, DataEngine(bars={("AAPL", "1h"): []})))
+    assert [r["ask_session_bars"] for r in late.outcomes.values()] == [0, 0]
+
+
+@pytest.mark.asyncio
+async def test_window_never_includes_bars_before_the_ask():
+    """A 10:00 ET low far under the stop happened before the 15:12 ask."""
+    def low(start):
+        return 300.0 if start < ASKED else 338.0
+
+    pool = JournalPool([verdict()])
+    engine = DataEngine(bars={("AAPL", "1h"): hourly_bars(low=low)})
+    await run(state_for(pool, engine))
+    rows = pool.rows_for("AAPL")
+    assert all(r["stop_hit"] is False and r["ask_session_bars"] == 1 for r in rows.values())
+    from decimal import Decimal
+    # The window's lowest low is 338 (the 15:30 bar and the daily bars):
+    # (338 − 338.95) / 338.95. A leaked 300 low would make it −11.49.
+    assert rows[(verdict()["id"], 1)]["mae_pct"] == Decimal("-0.280")
+    since = [c for c in engine.calls if c[:3] == ("bars", "AAPL", "1h")]
+    assert since, "the hourly read happened"
+
+
+@pytest.mark.asyncio
+async def test_price_scale_break_skips_the_verdict_in_the_run(caplog):
+    quarter = [{**b, **{k: b[k] / 4 for k in ("open", "high", "low", "close")}} for b in daily_bars()]
+    pool = JournalPool([verdict(asked=datetime(2026, 9, 21, 17, 0, tzinfo=ET))])
+    engine = DataEngine(bars={("AAPL", "1d"): quarter})
+    got = await run(state_for(pool, engine))
+    assert pool.outcomes == {} and got["unscored"] == 1
+    assert "price-scale break" in caplog.text and "AAPL" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_unreadable_plan_leaves_verdict_unscored(caplog):
+    pool = JournalPool([verdict(plan={"stop": "x"})])
+    engine = DataEngine()
+    got = await run(state_for(pool, engine))
+    assert got["unscored"] == 1 and engine.calls == [] and pool.outcomes == {}
+    assert "does not parse" in caplog.text
+
+
+# ── Storage and the lock ─────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_store_failure_rolls_back_ticker():
+    pool = JournalPool([verdict("AAA", 1), verdict("BBB", 2)], fail_for={verdict("AAA", 1)["id"]})
+    got = await run(state_for(pool, DataEngine()))
+    assert pool.rows_for("AAA") == {} and len(pool.rows_for("BBB")) == 2
+    assert got["skipped"] == 1 and got["scored"] == 2
+
+
+@pytest.mark.asyncio
+async def test_second_scorer_skips_when_locked():
+    redis = FakeRedis()
+    redis.kv[runner.LOCK_KEY] = "someone"
+    engine = DataEngine()
+    got = await run(state_for(JournalPool([verdict()]), engine, redis))
+    assert got["stoppedBy"] == "locked" and engine.calls == []
+    assert redis.kv[runner.LOCK_KEY] == "someone", "never releases a lock it did not take"
+
+
+@pytest.mark.asyncio
+async def test_lock_is_taken_with_its_ttl_and_released():
+    redis = FakeRedis()
+    await run(state_for(JournalPool([verdict()]), DataEngine(), redis))
+    assert redis.ttl[runner.LOCK_KEY] == 2700 and runner.LOCK_KEY not in redis.kv
+
+
+@pytest.mark.asyncio
+async def test_redis_down_scores_without_lock():
+    pool = JournalPool([verdict()])
+    got = await run(state_for(pool, DataEngine(), FakeRedis(broken=True)))
+    assert got["scored"] == 2
+
+
+# ── No LLM path ──────────────────────────────────────────────────
+
+LLM_MODULES = {"providers", "classifier", "analyst", "analyze", "prompts", "openai", "ledger"}
+
+
+def test_journal_never_imports_an_llm_path():
+    package = Path(__file__).resolve().parent.parent / "journal"
+    for src in package.glob("*.py"):
+        for node in ast.walk(ast.parse(src.read_text())):
+            names = []
+            if isinstance(node, ast.Import):
+                names = [a.name.split(".")[0] for a in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                names = [(node.module or "").split(".")[0]]
+            assert not set(names) & LLM_MODULES, (src.name, names)
+    # And nothing it imports drags one in.
+    out = subprocess.run(
+        [sys.executable, "-c",
+         "import sys; import journal.runner, journal.scoring, journal.sessions; "
+         f"print(sorted(m for m in {sorted(LLM_MODULES)!r} if m in sys.modules))"],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert out.returncode == 0, out.stderr[-2000:]
+    assert out.stdout.strip() == "[]"
