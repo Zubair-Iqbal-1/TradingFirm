@@ -150,6 +150,18 @@ def _retry_after_seconds(raw: Any, default: int) -> int:
     return min(seconds, config.LLM_COOLDOWN_MAX)
 
 
+def _system_content(system: str, cache_system: bool):
+    """The system message's content. A plain string unless the caller asked
+    for prompt caching, in which case it is one text block carrying
+    `cache_control` — the per-block form OpenRouter passes to Anthropic
+    models. A prefix under the model's minimum (1,024 tokens on Sonnet 5) is
+    not an error: the marker is ignored and `cacheWrite` stays absent, which
+    is how a live call measures whether the prefix cleared it."""
+    if not cache_system:
+        return system
+    return [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
+
+
 def _usage_dict(raw: Optional[dict]) -> dict:
     """OpenRouter's usage object flattened to the repo's camelCase, every key
     absent-safe. `cost` is OpenRouter's own accounting and is simply not there
@@ -248,6 +260,7 @@ class OpenAICompatProvider(LLMProvider):
         model: Optional[str] = None,
         max_tokens: Optional[int] = None,
         effort: Optional[str] = None,
+        cache_system: bool = False,
     ) -> LLMResult:
         started = time.monotonic()
         model = model or self._settings.llm_model
@@ -294,7 +307,7 @@ class OpenAICompatProvider(LLMProvider):
             "model": model,
             "max_tokens": max_tokens,
             "messages": [
-                {"role": "system", "content": system},
+                {"role": "system", "content": _system_content(system, cache_system)},
                 {"role": "user", "content": user},
             ],
             "response_format": {

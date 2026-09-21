@@ -661,3 +661,28 @@ async def test_preflight_error_logs_one_warning_with_no_status(caplog):
 def test_build_provider_returns_the_one_provider():
     p = build_provider(Settings(_env_file=None), None)
     assert isinstance(p, OpenAICompatProvider)
+
+
+# ── Part 4.4: cache_system ───────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_system_is_plain_string_by_default():
+    """Every caller before 4.4 sends exactly what it sent before."""
+    wire = Wire(ok())
+    await call(make(wire, redis=FakeRedis()))
+    assert wire.body["messages"][0] == {"role": "system", "content": "You are an analyst."}
+    assert "cache_control" not in json.dumps(wire.body)
+
+
+@pytest.mark.asyncio
+async def test_cache_system_sends_cache_control_block():
+    wire = Wire(ok(usage={"prompt_tokens": 1500, "completion_tokens": 10,
+                          "prompt_tokens_details": {"cached_tokens": 0,
+                                                    "cache_write_tokens": 1400}}))
+    result = await call(make(wire, redis=FakeRedis()), cache_system=True)
+    assert wire.body["messages"][0] == {"role": "system", "content": [
+        {"type": "text", "text": "You are an analyst.",
+         "cache_control": {"type": "ephemeral"}}]}
+    assert wire.body["messages"][1] == {"role": "user", "content": "AAPL, swing."}
+    # cacheWrite > 0 is how the live check reads "the prefix cleared 1,024".
+    assert result.usage["cacheWrite"] == 1400 and result.usage["cacheRead"] == 0

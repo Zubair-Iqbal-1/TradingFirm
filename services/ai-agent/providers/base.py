@@ -140,9 +140,12 @@ class LLMProvider(ABC):
         model: Optional[str] = None,
         max_tokens: Optional[int] = None,
         effort: Optional[str] = None,
+        cache_system: bool = False,
     ) -> LLMResult:
         """The three positional arguments are the plan row's. The keyword-only
         four are the extension 4.2 needs: `label` names the call in the log
         and in the schema, the rest send the classifier somewhere cheaper
-        without a second provider."""
+        without a second provider. `cache_system` (Part 4.4) marks the system
+        prompt as a cacheable prefix; off by default, so every earlier caller
+        sends exactly what it sent before."""
         raise NotImplementedError
