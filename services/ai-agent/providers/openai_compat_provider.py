@@ -28,6 +28,7 @@ anything, ever (G6).
 
 import json
 import logging
+import re
 import time
 from typing import Any, Optional
 
@@ -148,6 +149,26 @@ def _retry_after_seconds(raw: Any, default: int) -> int:
     if parsed > 0:
         seconds = parsed
     return min(seconds, config.LLM_COOLDOWN_MAX)
+
+
+# One provider slug as OpenRouter writes them ("anthropic", "google-vertex",
+# "amazon-bedrock/us"): a charset that cannot carry anything but a name.
+_PROVIDER_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9._/-]{0,63}$")
+
+
+def provider_routing(order: str) -> Optional[dict]:
+    """The request's `provider` object for LLM_PROVIDER_ORDER, or None when
+    the setting is empty (the field is then absent and OpenRouter routes as
+    it always has). `allow_fallbacks` is false on purpose: the point of
+    naming a host is to stay on it. Raises ValueError on a malformed slug —
+    pre-flight step 1, so a bad setting sends nothing and reserves nothing."""
+    if not isinstance(order, str) or not order.strip():
+        return None
+    slugs = [part.strip().lower() for part in order.split(",") if part.strip()]
+    for slug in slugs:
+        if not _PROVIDER_SLUG_RE.match(slug):
+            raise ValueError("LLM_PROVIDER_ORDER must be provider slugs, comma-separated")
+    return {"order": slugs, "allow_fallbacks": False}
 
 
 def _system_content(system: str, cache_system: bool):
@@ -275,6 +296,7 @@ class OpenAICompatProvider(LLMProvider):
         try:
             validate_request(system, user, schema, label)
             send_effort = resolve_effort(model, effort)
+            routing = provider_routing(self._settings.llm_provider_order)
         except ValueError as e:
             raise fail(e) from None
 
@@ -315,8 +337,13 @@ class OpenAICompatProvider(LLMProvider):
                 "json_schema": {"name": label, "schema": schema, "strict": True},
             },
         }
+        extra_body: dict[str, Any] = {}
         if send_effort is not None:
-            request["extra_body"] = {"reasoning": {"effort": send_effort}}
+            extra_body["reasoning"] = {"effort": send_effort}
+        if routing is not None:
+            extra_body["provider"] = routing
+        if extra_body:
+            request["extra_body"] = extra_body
         headers = self._headers()
         if headers is not None:
             request["extra_headers"] = headers

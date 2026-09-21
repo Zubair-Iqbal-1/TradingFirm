@@ -94,6 +94,15 @@ class Settings(BaseSettings):
     # source cooldown in the repo.
     llm_cooldown_seconds: int = 900
 
+    # OpenRouter provider routing (Part 4.4). Empty = OpenRouter's normal
+    # routing across every host of the model. Set (e.g. "anthropic", or a
+    # comma-separated list in order of preference), every request carries
+    # provider: {"order": [...], "allow_fallbacks": false}: the listed hosts
+    # only, never another. It exists because a prompt cache is per host, so
+    # routing that moves between five hosts rarely reads what it wrote.
+    # Never set in the dev twin.
+    llm_provider_order: str = ""
+
     # OpenRouter app attribution. Sent as HTTP-Referer / X-Title only when
     # non-empty; never a hard-coded value.
     llm_referer: str = ""

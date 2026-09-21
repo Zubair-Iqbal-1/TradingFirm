@@ -147,6 +147,7 @@ def make(wire=None, *, key="sk-or-test", cap=100, redis=None, **over):
     # LLM_BASE_URL and LLM_DAILY_CALL_CAP, and _env_file=None does not hide
     # the process environment.
     over.setdefault("llm_base_url", "https://openrouter.ai/api/v1")
+    over.setdefault("llm_provider_order", "")
     settings = Settings(_env_file=None, llm_api_key=SecretStr(key),
                         llm_daily_call_cap=cap, llm_model=GLM, **over)
     http = None
@@ -686,3 +687,41 @@ async def test_cache_system_sends_cache_control_block():
     assert wire.body["messages"][1] == {"role": "user", "content": "AAPL, swing."}
     # cacheWrite > 0 is how the live check reads "the prefix cleared 1,024".
     assert result.usage["cacheWrite"] == 1400 and result.usage["cacheRead"] == 0
+
+
+# ── Part 4.4: LLM_PROVIDER_ORDER ─────────────────────────────────
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model", [GLM, HAIKU])
+async def test_provider_field_absent_when_setting_is_empty(model):
+    """The default: OpenRouter routes as it always has, and the body is
+    byte-for-byte what it was before the setting existed."""
+    wire = Wire(ok())
+    await call(make(wire, redis=FakeRedis()), model=model)
+    assert "provider" not in wire.body
+    if model == HAIKU:                       # no reasoning either: no extra keys at all
+        assert set(wire.body) == {"model", "max_tokens", "messages", "response_format"}
+
+
+@pytest.mark.asyncio
+async def test_provider_field_present_and_exact_when_set():
+    wire = Wire(ok())
+    await call(make(wire, redis=FakeRedis(), llm_provider_order="anthropic"), model=SONNET)
+    assert wire.body["provider"] == {"order": ["anthropic"], "allow_fallbacks": False}
+    assert wire.body["reasoning"] == {"effort": "low"}, "reasoning rides beside it, unchanged"
+
+    wire = Wire(ok())
+    await call(make(wire, redis=FakeRedis(), llm_provider_order=" Anthropic , google-vertex "),
+               model=HAIKU)
+    assert wire.body["provider"] == {"order": ["anthropic", "google-vertex"],
+                                     "allow_fallbacks": False}
+    assert "reasoning" not in wire.body
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", ["anthropic; drop", "a b", "../x", "{}", "anthropic,,"[:-1] + "!"])
+async def test_malformed_provider_order_is_refused_before_http(bad):
+    wire, r = Wire(ok()), FakeRedis()
+    with pytest.raises(ValueError):
+        await call(make(wire, redis=r, llm_provider_order=bad))
+    assert wire.requests == [] and r.store == {}, "nothing sent, nothing reserved"
