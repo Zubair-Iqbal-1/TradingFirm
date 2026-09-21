@@ -49,6 +49,15 @@ STATE_LEDGER_MISSED = "ledger_missed"             # Part 4.4: rows ai.llm_calls 
 # Part 4.2: the classification cache, `tf:ai:classify:{digest}`.
 CLASSIFY_PREFIX = f"{AI_PREFIX}classify:"
 
+# Part 4.4: the per-ticker verdict cache and /analyze's in-flight lock.
+VERDICT_PREFIX = f"{AI_PREFIX}verdict:"
+LOCK_PREFIX = f"{AI_PREFIX}lock:analyze:"
+
+# Longer than the provider's hard 150 s per-call bound, so a lock never
+# expires under a call that is still running; short enough that a crashed
+# request blocks its one key for a few minutes at most.
+TTL_ANALYZE_LOCK = 200
+
 # The day counter's TTL: 36 h, long enough that a DST day cannot expire its
 # own key early, short enough that yesterday's keys disappear on their own.
 # This is for the two *reservation* counters, which must disappear.
@@ -603,3 +612,69 @@ async def store_classifications(
         except Exception as e:
             logger.warning(f"classification cache write failed for one item: {e}")
     return written
+
+
+# ── The verdict cache and the in-flight lock (Part 4.4) ──────────
+#
+# `suffix` is built by verdict_suffix() and nowhere else: user id, ticker
+# (already through tickers.validate_ticker), horizon, and the entry as integer
+# cents or `auto`. Both keys share it, so a lock always guards exactly the
+# cache entry it is about to write.
+
+def verdict_suffix(user_id: str, ticker: str, horizon: str, entry_key: str) -> str:
+    parts = (user_id, ticker, horizon, entry_key)
+    if not all(isinstance(p, str) and p.strip() and ":" not in p for p in parts):
+        raise ValueError("verdict key parts must be non-empty strings without ':'")
+    return f"{user_id.strip().lower()}:{canonical(ticker)}:{horizon.strip().lower()}:{entry_key.strip().lower()}"
+
+
+async def get_cached_verdict(r: Optional[aioredis.Redis], suffix: str) -> Optional[dict]:
+    """{verdictId, fingerprint, entry} or None. A miss, a raise and an
+    unparseable value are all a miss: the cost is one more verdict, never a
+    wrong one."""
+    if r is None:
+        return None
+    try:
+        raw = await r.get(f"{VERDICT_PREFIX}{suffix}")
+        value = json.loads(raw) if raw else None
+    except Exception as e:
+        logger.warning(f"verdict cache read failed, treating as a miss: {e}")
+        return None
+    if isinstance(value, dict) and all(isinstance(value.get(k), str)
+                                       for k in ("verdictId", "fingerprint", "entry")):
+        return value
+    return None
+
+
+async def store_cached_verdict(r: Optional[aioredis.Redis], suffix: str, value: dict, ttl: int) -> bool:
+    if r is None:
+        return False
+    try:
+        await r.set(f"{VERDICT_PREFIX}{suffix}", json.dumps(value), ex=ttl)
+        return True
+    except Exception as e:
+        logger.warning(f"verdict cache write failed; the next call pays again: {e}")
+        return False
+
+
+async def acquire_analyze_lock(r: Optional[aioredis.Redis], suffix: str) -> bool:
+    """True when this request may spend. False only when Redis says another
+    request holds the same key; Redis absent or raising is True (fail-open:
+    a Redis blip must not take the analyst down, and the caps still bound
+    the spend)."""
+    if r is None:
+        return True
+    try:
+        return bool(await r.set(f"{LOCK_PREFIX}{suffix}", "1", ex=TTL_ANALYZE_LOCK, nx=True))
+    except Exception as e:
+        logger.warning(f"analyze lock failed, proceeding without one: {e}")
+        return True
+
+
+async def release_analyze_lock(r: Optional[aioredis.Redis], suffix: str) -> None:
+    if r is None:
+        return
+    try:
+        await r.delete(f"{LOCK_PREFIX}{suffix}")
+    except Exception as e:
+        logger.warning(f"analyze lock release failed; it expires in {TTL_ANALYZE_LOCK}s: {e}")
