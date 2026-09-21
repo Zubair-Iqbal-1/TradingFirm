@@ -924,3 +924,73 @@ On all four pre-expiry nights the 00:15 reading sat at ES −0.85…−0.95 / NQ
 **Why open:** it would be the first price level not taken from a zone, and 4.4's prompt rule is "never invent price levels".
 
 **Supersedes:** nothing.
+
+---
+
+## 2026-09-21 — Part 4.4's migration is `007_ai.sql`, and its seed carries no account size
+
+**Decision:** plan row 4.4's `005_ai.sql` ships as `007_ai.sql`: 005 and 006 are risk-shield's, and `migrate.sh` keys by filename. It seeds the dev user with `account_size = NULL`, `risk_per_trade_pct = 1.0`. The number is set by hand from `docs/runbook.md`; until then `/analyze` answers 409. It is never sent to the model.
+
+**Why:** the repo is public. `INSERT … ON CONFLICT DO NOTHING` is re-runnable, which is what the "no plain INSERT seeds" rule protects.
+
+**Supersedes:** the filename in plan row 4.4 (and pushes plan row 5.1's `006_notify.sql` to the next free number).
+
+---
+
+## 2026-09-21 — The verdict's macro view is risk-shield's regime now, and the brief when one exists
+
+**Decision:** `/analyze` reads `GET /market/health` and `GET /macro/brief`, both fail-open. The brief 404s until 4.6 ships and the flag goes on; then it appears in the prompt with no 4.4 change. `ai.verdicts.macro_brief_id` is a plain UUID, no foreign key into `risk`.
+
+**Why:** 4.6 first would have needed a flag flip and an out-of-hours risk-shield deploy, and a verdict with a real regime and no brief is already useful.
+
+**Supersedes:** nothing.
+
+---
+
+## 2026-09-21 — Headlines are grouped into events by an `eventKey` the classifier writes
+
+**Decision:** the classifier answer gains a required `eventKey` slug (`^[a-z0-9]+(-[a-z0-9]+){1,7}$`, ≤ 80). ai-agent's `events.group` hands the verdict one line per key with a source count. A model won't re-invent the same slug in a later batch, so the request takes `knownEventKeys` (≤ 40, each regex-checked) for reuse. data-engine accepts the key as optional, so it deploys first. A label without a key is its own event.
+
+**Why:** three outlets on one story read as three reasons. Grouping happens where the prompt is built, in ai-agent, not in data-engine's dossier: the key is the classifier's output and lives on the label.
+
+**Supersedes:** the "fix belongs to dossier assembly" line of 2026-09-20's cross-source-duplicates entry. The digest itself is unchanged: three urls are still three classifications.
+
+---
+
+## 2026-09-21 — `ai.llm_calls` is the permanent ledger, and it re-seeds the daily caps at startup
+
+**Decision:** one row per LLM request that reached the wire, whatever it answered, written by the routes (both of them). Nothing else: a pre-wire refusal writes no row, and a verdict-cache hit bumps `ai.verdicts.served_count` instead. At startup each day counter and cost total is raised to the ledger's number when Redis is lower — on 4.1's own keys, by `INCRBY` / `INCRBYFLOAT` + `EXPIRE … NX`, max of the two. A failed ledger write never fails a paid call; it counts in `tf:ai:state:ledger_missed:{day}`.
+
+**Why:** a `docker compose down` reset today's caps to zero (2026-09-20, Redis persistence). A `SET` would drop the key's TTL and let the `EXPIRE` push the expiry forward. Also found: `LLMAuthFailed` is a wire call although it subclasses the pre-wire `LLMNotConfigured`, so outcomes are looked up by exact type; and 4.2 left a rejected batch's cost out of `/usage`, now counted before the answer is judged.
+
+**Supersedes:** nothing. The housekeeping fix (`redisdata:/data` + AOF) still stands for the cache and the cooldown.
+
+---
+
+## 2026-09-21 — A cached verdict is served only while its input fingerprint holds
+
+**Decision:** per-ticker cache (D18), 4 h flat, keyed `{user}:{TICKER}:{horizon}:{entry cents | auto}`; `auto` is the dossier's last daily close in cents, and the resolved entry is always stored. It is served only if the fingerprint matches: high-relevance event keys, next earnings date, regime, brief id, bar date, the close in whole ATRs from the cached verdict's entry, account, risk %, prompt sha, model. A cache-served analyze can still pay one classifier call, never a verdict call. One paid call per key at a time (`SET NX EX 200`).
+
+**Why:** a time slot alone serves a stale verdict through a guidance cut, and re-asks for nothing on a quiet day.
+
+**Supersedes:** nothing.
+
+---
+
+## 2026-09-21 — The model supplies no number, and headline text is data
+
+**Decision:** the verdict's LLM schema has no price, R or size field; every level is `plan_math`'s. When plan math rejects (the ATH `no_target` gap included) the schema loses `go` and the three plan fields, and the rejection is the `wait` / `avoid` reason. Headline-derived text reaches the prompt only as JSON strings in a block tagged with a per-request nonce, `<` `>` escaped. Over-long strings in an answer are trimmed (4.2's `oneLine` precedent); any other contract break rejects it whole.
+
+**Why:** an injected headline can then at worst tilt the text. The ATH gap stays open.
+
+**Supersedes:** nothing.
+
+---
+
+## 2026-09-21 — Live analyst checks run on the host against the loopback route
+
+**Decision:** `scripts/analyze_live.sh <TICKER>` curls `127.0.0.1:8004/analyze/…` and `/usage`. No script lives in any image, and it never reads `.env`. 4.8's five tickers use the same script. `tests/classify_live.py` keeps its `python3 -c` path.
+
+**Why:** the route is the live check; the classifier needed a script only because its headlines were made up.
+
+**Supersedes:** the open question in 2026-09-21 "live scripts cannot run from the prod image (open for 4.8)".
