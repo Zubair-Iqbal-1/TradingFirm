@@ -186,7 +186,40 @@ def test_sentiment_repeat_write_overwrites(client):
     conn.executemany.assert_not_awaited()
 
 
+@pytest.mark.parametrize("key, status", [
+    (None, 200),                                  # absent: pre-4.4 callers
+    ("nvda-q3-guidance-cut", 200),
+    ("a1-b2", 200),
+    ("nvda", 422),                                # one word is not a slug
+    ("NVDA-guidance-cut", 422),                   # upper case
+    ("nvda guidance cut", 422),
+    ("nvda--cut", 422),
+    ("-nvda-cut", 422),
+    ("a-b-c-d-e-f-g-h-i", 422),                   # nine words
+    ("a-" + "b" * 80, 422),                       # over 80 chars
+    ("", 422),
+])
+def test_sentiment_event_key_optional_and_validated(client, key, status):
+    """Part 4.4: eventKey is optional (deploy order, older labels) and
+    validated when present. A stored value carries it only when sent."""
+    pool, conn = _pool()
+    body = dict(BODY) if key is None else {**BODY, "eventKey": key}
+    resp = client(pool).post("/news/41/sentiment", json=body)
+    assert resp.status_code == status
+    if status == 200:
+        stored = json.loads(conn.fetchrow.await_args.args[2])
+        assert stored.get("eventKey") == key
+        assert ("eventKey" in stored) is (key is not None)
+    else:
+        conn.fetchrow.assert_not_awaited()
+
+
 def test_sentiment_contract_pinned_to_spec():
+    assert (main.SENTIMENT_EVENT_KEY_MAX, main.SENTIMENT_EVENT_KEY_RE) == (
+        80, r"^[a-z0-9]+(-[a-z0-9]+){1,7}$"), (
+        "ai-agent's classifier.EVENT_KEY_MAX / EVENT_KEY_RE keep a copy "
+        "(spec 4.4 decision 4). Change both or neither."
+    )
     assert main.SENTIMENT_RELEVANCE == ("high", "medium", "low")
     assert main.SENTIMENT_CATEGORIES == (
         "guidance", "analyst", "legal", "product", "macro", "insider", "other")

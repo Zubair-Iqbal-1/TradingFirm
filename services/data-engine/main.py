@@ -927,6 +927,11 @@ SENTIMENT_RELEVANCE = ("high", "medium", "low")
 SENTIMENT_CATEGORIES = ("guidance", "analyst", "legal", "product", "macro", "insider", "other")
 SENTIMENT_ONE_LINE_MAX = 300
 SENTIMENT_MODEL_MAX = 100
+# Part 4.4: the event slug that lets one story from three sources group into
+# one line of the verdict prompt. Optional here (rows labelled before 4.4 and
+# an older ai-agent during a deploy carry none), validated when present.
+SENTIMENT_EVENT_KEY_MAX = 80
+SENTIMENT_EVENT_KEY_RE = r"^[a-z0-9]+(-[a-z0-9]+){1,7}$"
 
 
 def _decode_sentiment(raw):
@@ -954,6 +959,9 @@ class NewsSentimentRequest(BaseModel):
     oneLine: str = Field(max_length=SENTIMENT_ONE_LINE_MAX)
     model: str = Field(max_length=SENTIMENT_MODEL_MAX)
     classifiedAt: AwareDatetime
+    eventKey: Optional[str] = Field(
+        default=None, max_length=SENTIMENT_EVENT_KEY_MAX, pattern=SENTIMENT_EVENT_KEY_RE
+    )
 
     @field_validator("relevance")
     @classmethod
@@ -1003,6 +1011,8 @@ async def set_news_sentiment_route(news_id: int, body: NewsSentimentRequest):
         "model": body.model,
         "classifiedAt": body.classifiedAt.isoformat(),
     }
+    if body.eventKey is not None:
+        value["eventKey"] = body.eventKey
     try:
         updated = await set_news_sentiment(pool, news_id, value)
     except (*DB_ERRORS, TimeoutError) as e:

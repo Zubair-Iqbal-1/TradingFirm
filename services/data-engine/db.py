@@ -302,6 +302,49 @@ SET_NEWS_SENTIMENT_SQL = """
 """
 
 
+# Part 4.4: the dossier's news section is presented from the fetched rows,
+# and upsert_news is ON CONFLICT DO NOTHING with no RETURNING, so this read is
+# what gives each presented headline its row id (the classifier's write-back
+# target) and the label it may already carry.
+GET_NEWS_LABELS_SQL = """
+    SELECT id, url, sentiment
+    FROM data_engine.news_items
+    WHERE ticker = $1 AND url = ANY($2::text[])
+"""
+
+
+def decode_sentiment(raw) -> Optional[dict]:
+    """jsonb arrives as text (no codec is registered). A sentiment that will
+    not parse reads as null rather than failing the whole list — the same
+    rule get_events uses for `meta`."""
+    if raw is None:
+        return None
+    if isinstance(raw, dict):
+        return raw
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        logger.warning("news_items: unparseable sentiment on a row, returning null")
+        return None
+    return value if isinstance(value, dict) else None
+
+
+async def get_news_labels(pool: asyncpg.Pool, ticker: str, urls: list[str]) -> dict[str, dict]:
+    """
+    {url: {"id", "sentiment"}} for the stored rows of `ticker` among `urls`
+    (Part 4.4). Read-only, one statement, served by the (ticker, url) unique
+    index. A url with no row is simply absent from the answer.
+    """
+    if not urls:
+        return {}
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(GET_NEWS_LABELS_SQL, ticker, urls)
+    return {
+        row["url"]: {"id": row["id"], "sentiment": decode_sentiment(row["sentiment"])}
+        for row in rows
+    }
+
+
 async def get_market_news(pool: asyncpg.Pool, since: datetime, limit: int) -> list[dict]:
     """
     Market news (ticker = MARKET_TICKER) published at or after `since`,

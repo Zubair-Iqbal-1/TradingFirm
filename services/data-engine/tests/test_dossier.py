@@ -21,6 +21,7 @@ import pytest
 import respx
 
 import cache as cache_mod
+import db
 from cache import MemoryCooldowns
 from dossier import HORIZON_PROFILES, HORIZON_SWING, MAX_FILINGS, MAX_HEADLINES
 from dossier.assemble import (
@@ -94,7 +95,11 @@ def _bars(n: int, last: date, *, ticker: str = TICKER) -> list[dict]:
 class FakePool:
     """Answers by SQL shape: bars, events, stocks. Records every write."""
 
-    def __init__(self, *, bars=None, events=None, stock=None, raise_on=None):
+    def __init__(self, *, bars=None, events=None, stock=None, raise_on=None,
+                 labels=None):
+        # {url: sentiment-or-None}: what the store already holds for a url.
+        # Every url asked for gets an id, the way upsert_news just stored it.
+        self.labels = labels or {}
         self.bars = bars if bars is not None else {}
         self.events = events or []
         self.stock = stock
@@ -121,6 +126,12 @@ class FakePool:
 
     async def _fetch(self, query, *args):
         self._guard(query)
+        if "news_items" in query:
+            return [
+                {"id": 1000 + i, "url": url,
+                 "sentiment": json.dumps(self.labels[url]) if self.labels.get(url) else None}
+                for i, url in enumerate(args[1])
+            ]
         if "ohlcv_bars" in query:
             ticker, interval = args[0], args[1]
             rows = self.bars.get((ticker, interval), [])
@@ -1087,3 +1098,53 @@ async def test_alphavantage_cooldown_skips_av(_no_network):
 
     assert result == {"source": None, "stored": 0, "dropped": 0, "reason": "cooldown"}
     assert av.get.await_count == 0
+
+
+# ── Part 4.4: ids and stored labels on the news section ──────────────────
+
+@pytest.mark.asyncio
+async def test_dossier_news_carries_id_and_sentiment(_no_network):
+    """Every kept headline carries its news_items id, and a row the
+    classifier already labelled carries that label object — so ai-agent can
+    write back, and never re-sends a labelled headline."""
+    news = _fixture("finnhub", "AAPL_news.json")
+    labelled_url = news[0]["url"]
+    label = {"relevance": "high", "sentiment": -0.4, "category": "guidance",
+             "oneLine": "Guidance cut.", "model": "m", "eventKey": "aapl-guidance-cut",
+             "classifiedAt": "2026-09-20T18:00:00+00:00"}
+    _mount_all(_no_network)
+    pool = FakePool(bars={(TICKER, "1d"): _bars(60, TODAY)}, labels={labelled_url: label})
+
+    d = await assemble(_ctx(pool=pool), TICKER, HORIZON_SWING)
+
+    items = d.sections.news.items
+    assert items and all(isinstance(i.id, int) for i in items)
+    by_url = {i.url: i for i in items}
+    assert by_url[labelled_url].sentiment == label
+    assert all(i.sentiment is None for i in items if i.url != labelled_url)
+    sql = [q for q in pool.reads if "news_items" in q and "SELECT" in q]
+    assert sql == [db.GET_NEWS_LABELS_SQL]
+    assert "url = ANY($2::text[])" in sql[0] and "ticker = $1" in sql[0]
+
+
+@pytest.mark.asyncio
+async def test_dossier_news_without_pool_has_null_ids(_no_network):
+    """build_news with no pool: nothing to read back, so ids and labels are
+    None and the section is still ok."""
+    from dossier.assemble import build_news
+
+    _mount_finnhub(_no_network)
+    section = await build_news(_ctx(pool=None), TICKER, HORIZON_PROFILES[HORIZON_SWING])
+
+    assert section.status == STATUS_OK and section.items
+    assert all(i.id is None and i.sentiment is None for i in section.items)
+
+
+@pytest.mark.asyncio
+async def test_dossier_news_label_read_failure_is_a_db_error(_no_network):
+    """The read-back raising is a dead database, not a degraded section."""
+    import asyncpg
+    _mount_all(_no_network)
+    pool = FakePool(bars={(TICKER, "1d"): _bars(60, TODAY)}, raise_on="url = ANY")
+    with pytest.raises(asyncpg.PostgresError):
+        await assemble(_ctx(pool=pool), TICKER, HORIZON_SWING)

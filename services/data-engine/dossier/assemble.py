@@ -312,18 +312,28 @@ async def build_news(ctx: DossierContext, ticker: str, profile: dict) -> NewsSec
     rows.sort(key=lambda r: r["published_at"], reverse=True)
     truncated = len(rows) > MAX_HEADLINES
     kept = rows[:MAX_HEADLINES]
+
+    # Part 4.4: the rows are presented from the fetch, so the store is asked
+    # for each kept headline's id and any label it already carries. A raise
+    # here is a database failure like any other (DB_ERRORS -> 503); no pool
+    # means ids stay None and ai-agent classifies without write-back.
+    labels: dict[str, dict] = {}
+    if ctx.pool is not None and kept:
+        from db import get_news_labels
+        labels = await get_news_labels(ctx.pool, ticker, [r["url"] for r in kept])
     if truncated:
         logger.info(f"dossier news {ticker}: {len(rows)} headlines capped to {MAX_HEADLINES}")
     return NewsSection(
         status=STATUS_TRUNCATED if truncated else STATUS_OK,
         items=[
             {
+                "id": labels.get(r["url"], {}).get("id"),
                 "publishedAt": r["published_at"],
                 "source": r["source"],
                 "headline": r["title"],
                 "summary": r["summary"],
                 "url": r["url"],
-                "sentiment": None,
+                "sentiment": labels.get(r["url"], {}).get("sentiment"),
             }
             for r in kept
         ],

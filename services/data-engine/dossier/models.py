@@ -101,13 +101,17 @@ class IndicatorsSection(IndicatorsResponse):
 
 
 class NewsItem(_Base):
+    # The news_items row id (Part 4.4): what ai-agent's classifier writes a
+    # label back to. None when the store could not be read (no pool).
+    id: Optional[int] = None
     published_at: Optional[datetime] = Field(None, alias="publishedAt")
     source: Optional[str] = None
     headline: Optional[str] = None
     summary: Optional[str] = None
     url: Optional[str] = None
-    # Filled by Phase 4's classifier; empty here by plan row 2.4.
-    sentiment: Optional[str] = None
+    # The stored classification object (Part 4.2's write-back), or None for
+    # a headline nobody has labelled yet. Up to one dossier TTL stale.
+    sentiment: Optional[dict] = None
 
 
 class NewsSection(Section):
