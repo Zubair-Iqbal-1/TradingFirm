@@ -23,6 +23,7 @@ that is checked here.
 """
 
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -51,13 +52,37 @@ CATEGORIES = ("guidance", "analyst", "legal", "product", "macro", "insider", "ot
 ONE_LINE_MAX = 300          # data-engine's SENTIMENT_ONE_LINE_MAX
 MODEL_MAX = 100             # data-engine's SENTIMENT_MODEL_MAX
 
+# Part 4.4: the event slug. One story from three sources gets one key, and the
+# verdict prompt is handed one line per key (events.group). Two to eight
+# lowercase words joined by hyphens — a charset that cannot carry markup, so a
+# key can be echoed back into a later prompt as-is. data-engine keeps the same
+# two values (SENTIMENT_EVENT_KEY_RE / _MAX) and accepts the key as optional.
+EVENT_KEY_MAX = 80
+EVENT_KEY_PATTERN = r"^[a-z0-9]+(-[a-z0-9]+){1,7}$"
+EVENT_KEY_RE = re.compile(EVENT_KEY_PATTERN)
+
+# How many already-known keys a caller may offer for reuse. A model will not
+# reliably re-invent the same slug in a later batch, so /analyze passes the
+# keys already on the ticker's labelled headlines.
+KNOWN_KEYS_MAX = 40
+
 ITEM_LIMITS = {
     "relevance": RELEVANCE,
     "category": CATEGORIES,
     "sentiment": (-1.0, 1.0),
     "oneLine": ONE_LINE_MAX,
     "model": MODEL_MAX,
+    "eventKey": (EVENT_KEY_MAX, EVENT_KEY_PATTERN),
 }
+
+
+def valid_event_key(value) -> bool:
+    """The one check every event key goes through, in and out (G1.5)."""
+    return (
+        isinstance(value, str)
+        and len(value) <= EVENT_KEY_MAX
+        and EVENT_KEY_RE.match(value) is not None
+    )
 
 # Batch size. One call per batch, so this is also the coarseness of the spend.
 BATCH_MAX = 30
@@ -86,13 +111,14 @@ SCHEMA: dict[str, Any] = {
             "items": {
                 "type": "object",
                 "additionalProperties": False,
-                "required": ["index", "relevance", "sentiment", "category", "oneLine"],
+                "required": ["index", "relevance", "sentiment", "category", "oneLine", "eventKey"],
                 "properties": {
                     "index": {"type": "integer"},
                     "relevance": {"type": "string", "enum": list(RELEVANCE)},
                     "sentiment": {"type": "number", "minimum": -1, "maximum": 1},
                     "category": {"type": "string", "enum": list(CATEGORIES)},
                     "oneLine": {"type": "string"},
+                    "eventKey": {"type": "string"},
                 },
             },
         },
@@ -110,9 +136,14 @@ class BatchRejected(ClassifierError):
 
 # ── Prompt ───────────────────────────────────────────────────────
 
-def user_prompt(headlines: list[dict]) -> str:
+def user_prompt(headlines: list[dict], known_event_keys: Optional[list[str]] = None) -> str:
     """The numbered list the model answers against. `index` is the position
-    in THIS list, which is what ties an answer back to a headline."""
+    in THIS list, which is what ties an answer back to a headline.
+
+    `known_event_keys` are slugs already given to this ticker's stories; only
+    ones passing valid_event_key reach the prompt, so the list cannot carry
+    text of anyone's choosing."""
+    known = [k for k in (known_event_keys or []) if valid_event_key(k)][:KNOWN_KEYS_MAX]
     lines = []
     for index, h in enumerate(headlines):
         parts = [f"[{index}] {h['title'][:TITLE_MAX]}"]
@@ -126,9 +157,17 @@ def user_prompt(headlines: list[dict]) -> str:
         if summary:
             parts.append(f"    summary: {summary[:SUMMARY_MAX]}")
         lines.append("\n".join(parts))
+    reuse = ""
+    if known:
+        reuse = (
+            "Event keys already in use for earlier headlines — reuse one, "
+            "unchanged, when a headline is the same story:\n"
+            + "\n".join(f"- {k}" for k in known) + "\n\n"
+        )
     return (
         f"Classify these {len(headlines)} headlines. "
         f"Return exactly {len(headlines)} items, one per index.\n\n"
+        + reuse
         + "\n\n".join(lines)
     )
 
@@ -182,11 +221,17 @@ def validate_answer(data: dict, expected: int) -> list[dict]:
         if "\x00" in one_line:
             raise BatchRejected(f"item {index}: oneLine contains NUL")
 
+        # Last on purpose: every older rule keeps reporting its own reason.
+        event_key = raw.get("eventKey")
+        if not valid_event_key(event_key):
+            raise BatchRejected(f"item {index}: eventKey is not a 2-8 word lowercase slug")
+
         by_index[index] = {
             "relevance": relevance,
             "sentiment": sentiment,
             "category": category,
             "oneLine": one_line.strip()[:ONE_LINE_MAX],
+            "eventKey": event_key,
         }
 
     return [by_index[i] for i in range(expected)]
@@ -203,6 +248,7 @@ async def _call_model(
     model: Optional[str],
     cap: int,
     now: Optional[datetime] = None,
+    known_event_keys: Optional[list[str]] = None,
 ) -> LLMResult:
     """One structured call, with the classifier's own reservation around it.
 
@@ -224,7 +270,7 @@ async def _call_model(
     try:
         return await provider.complete_structured(
             prompts.load(prompts.HEADLINE_CLASSIFY),
-            user_prompt(headlines),
+            user_prompt(headlines, known_event_keys),
             SCHEMA,
             label=LABEL,
             model=model,
@@ -250,6 +296,7 @@ async def classify(
     model: Optional[str],
     cap: int,
     now: Optional[datetime] = None,
+    known_event_keys: Optional[list[str]] = None,
 ) -> tuple[list[dict], Optional[LLMResult]]:
     """Classify `headlines`, returning (one classification per headline,
     the LLMResult or None when everything came from cache).
@@ -260,6 +307,9 @@ async def classify(
     """
     digests = [cache.headline_digest(h["title"], h.get("url")) for h in headlines]
     cached = await cache.get_classifications(redis, sorted(set(digests)))
+    # A label stored before Part 4.4 has no eventKey. It reads as a miss and
+    # is classified once more, so every label the verdict sees can be grouped.
+    cached = {d: c for d, c in cached.items() if valid_event_key(c.get("eventKey"))}
 
     # One prompt line per *distinct* unseen digest: the same story twice in
     # one batch is one payment, and both items get the answer.
@@ -278,7 +328,8 @@ async def classify(
     to_send = [first_for[d] for d in wanted]
 
     result = await _call_model(
-        provider, redis, memory_cap, to_send, model=model, cap=cap, now=now
+        provider, redis, memory_cap, to_send, model=model, cap=cap, now=now,
+        known_event_keys=known_event_keys,
     )
     answers = validate_answer(result.data, len(to_send))
 
@@ -303,3 +354,26 @@ async def classify(
         else:
             out.append(dict(cached[digest], cached=True))
     return out, result
+
+
+# ── Write-back ───────────────────────────────────────────────────
+
+async def write_back(http, base_url: str, ids: list[Optional[int]], results: list[dict]) -> tuple[int, int]:
+    """Write every classification whose item has an id to data-engine —
+    cached or fresh (spec 4.2 decision 6b). Returns (written, errors).
+
+    One function for both callers, /classify/headlines and /analyze
+    (Part 4.4), so the "every item with an id" rule cannot drift between
+    them. Fail-open: data_engine_client never raises.
+    """
+    import data_engine_client
+
+    written, errors = 0, 0
+    for news_id, classification in zip(ids, results):
+        if news_id is None:
+            continue
+        payload = {k: v for k, v in classification.items() if k != "cached"}
+        outcome = await data_engine_client.write_sentiment(http, base_url, news_id, payload)
+        written += 1 if outcome.ok else 0
+        errors += 0 if outcome.ok else 1
+    return written, errors

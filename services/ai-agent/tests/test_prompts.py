@@ -17,7 +17,7 @@ def test_headline_classify_prompt_ships_and_states_the_contract():
     assert text.strip()
     # Every enum the schema accepts has to be described, or the model is
     # being asked to guess what "insider" means.
-    for word in ("relevance", "sentiment", "category", "oneLine"):
+    for word in ("relevance", "sentiment", "category", "oneLine", "eventKey"):
         assert word in text
     for value in ("high", "medium", "low"):
         assert f"`{value}`" in text

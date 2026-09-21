@@ -35,7 +35,6 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validato
 import cache
 import classifier
 import config
-import data_engine_client
 import prompts
 from config import settings
 from providers.base import (
@@ -275,6 +274,18 @@ class ClassifyRequest(BaseModel):
 
     items: list[HeadlineItem] = Field(min_length=1, max_length=classifier.BATCH_MAX)
     writeBack: bool = True
+    # Part 4.4: slugs already given to this ticker's stories, offered to the
+    # model for reuse. Each must be a valid slug — a free-text list here
+    # would be a way to put arbitrary text into the prompt.
+    knownEventKeys: list[str] = Field(default_factory=list, max_length=classifier.KNOWN_KEYS_MAX)
+
+    @field_validator("knownEventKeys")
+    @classmethod
+    def _known_keys_are_slugs(cls, value: list[str]) -> list[str]:
+        for key in value:
+            if not classifier.valid_event_key(key):
+                raise ValueError("knownEventKeys entries must be 2-8 word lowercase slugs")
+        return value
 
 
 @app.post("/classify/headlines")
@@ -314,6 +325,7 @@ async def classify_headlines(body: ClassifyRequest):
             provider, redis, memory_cap, memory_cost, headlines,
             model=settings.llm_model_classifier,
             cap=settings.llm_classifier_daily_call_cap,
+            known_event_keys=body.knownEventKeys,
         )
     except (LLMCapExceeded, LLMCooledDown, LLMRateLimited) as e:
         logger.warning(f"/classify/headlines refused: {type(e).__name__}")
@@ -335,16 +347,10 @@ async def classify_headlines(body: ClassifyRequest):
 
     written, errors = 0, 0
     if body.writeBack:
-        http = getattr(app.state, "http", None)
-        for item, classification in zip(body.items, results):
-            if item.id is None:
-                continue
-            payload = {k: v for k, v in classification.items() if k != "cached"}
-            outcome = await data_engine_client.write_sentiment(
-                http, settings.data_engine_url, item.id, payload
-            )
-            written += 1 if outcome.ok else 0
-            errors += 0 if outcome.ok else 1
+        written, errors = await classifier.write_back(
+            getattr(app.state, "http", None), settings.data_engine_url,
+            [item.id for item in body.items], results,
+        )
 
     cached_count = sum(1 for c in results if c["cached"])
     return {
@@ -363,6 +369,7 @@ async def classify_headlines(body: ClassifyRequest):
                 "sentiment": c["sentiment"],
                 "category": c["category"],
                 "oneLine": c["oneLine"],
+                "eventKey": c["eventKey"],
                 "cached": c["cached"],
             }
             for item, c in zip(body.items, results)
