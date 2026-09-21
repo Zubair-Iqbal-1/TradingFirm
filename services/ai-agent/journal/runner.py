@@ -1,7 +1,7 @@
 """
 TradingFirm — the journal scorer (Part 4.5).
 
-`score_once` is one night: find every stored verdict whose +1 / +5 / +20
+`score_once` is one night: find every stored verdict whose +1 / +5 / +20 / +30 / +60
 XNYS session has closed and is unscored and not expired, refresh each of
 their tickers through data-engine's existing route (one at a time, paced),
 read the stored bars back, and write one ai.verdict_outcomes row per horizon.
@@ -41,12 +41,15 @@ from tickers import validate_ticker
 
 logger = logging.getLogger(__name__)
 
-HORIZONS = (1, 5, 20)
+HORIZONS = sessions.HORIZONS
 MAX_ATTEMPTS = 20               # refreshes a night, cooldown retries included
 SPACING_SECONDS = 5
 REFRESH_TIMEOUT = 120.0
 BARS_TIMEOUT = 30.0
-SELECTION_DAYS = 60             # a cheap pre-filter; expiry is by the calendar
+# A cheap pre-filter; expiry is by the calendar. A +60 horizon is last due
+# 70 sessions after day 0 — 100 calendar days for a 2026-09-21 ask, across
+# Thanksgiving and Christmas — so 110 keeps it in the window with a margin.
+SELECTION_DAYS = 110
 
 LOCK_KEY = f"{AI_PREFIX}lock:journal"
 LOCK_TTL = 2700                 # 17:30–18:10, a last 120 s refresh, and margin
@@ -216,7 +219,8 @@ async def score_once(state, settings, *, deadline: Optional[datetime] = None,
     try:
         now = clock()
         try:
-            rows = await db.due_verdicts(pool, db.DEV_USER_ID, now - timedelta(days=SELECTION_DAYS))
+            rows = await db.due_verdicts(pool, db.DEV_USER_ID, now - timedelta(days=SELECTION_DAYS),
+                                         len(HORIZONS))
         except Exception as e:
             logger.warning(f"journal: due-verdict read failed ({type(e).__name__}); night skipped")
             return {**result, "stoppedBy": "database error"}

@@ -25,7 +25,13 @@ ET = ZoneInfo("America/New_York")
 DE = "http://data-engine-dev:8001"
 ASKED = datetime(2026, 9, 21, 15, 12, tzinfo=ET)          # the AAPL asks: in session
 NIGHT_0928 = datetime(2026, 9, 28, 17, 30, tzinfo=ET)     # +1 and +5 due
-NIGHT_1019 = datetime(2026, 10, 19, 17, 30, tzinfo=ET)    # +20 due, +1 expired by now
+# The AAPL targets (day 0 = 2026-09-21), each night the one on which that
+# horizon is due; +1 and +5 are due together on 09-28.
+TARGET_NIGHTS = {1: datetime(2026, 9, 28, 17, 30, tzinfo=ET), 5: datetime(2026, 9, 28, 17, 30, tzinfo=ET),
+                 20: datetime(2026, 10, 19, 17, 30, tzinfo=ET), 30: datetime(2026, 11, 2, 17, 30, tzinfo=ET),
+                 60: datetime(2026, 12, 15, 17, 30, tzinfo=ET)}
+TARGET_DATES = {1: date(2026, 9, 22), 5: date(2026, 9, 28), 20: date(2026, 10, 19),
+                30: date(2026, 11, 2), 60: date(2026, 12, 15)}
 
 PLAN = {"entry": 338.95, "stop": 330.0, "stopBasis": "support minus 1 ATR",
         "disasterLine": 325.0, "invalidation": "daily close below the 20 EMA",
@@ -49,7 +55,7 @@ class JournalPool(FakePool):
         out = []
         for v in self.verdicts:
             scored = [h for (vid, h) in self.outcomes if vid == v["id"]]
-            if len(scored) < 3 and v["asked_at"] >= args[1]:
+            if len(scored) < args[2] and v["asked_at"] >= args[1]:
                 out.append({**v, "plan_proposed": json.dumps(v["plan_proposed"])
                             if v["plan_proposed"] is not None else None, "scored": scored})
         return out
@@ -102,7 +108,7 @@ class FakeRedis:
         self.ttl[key] = seconds
 
 
-def daily_bars(first=date(2026, 9, 17), last=date(2026, 10, 20), price=340.0, skip=()):
+def daily_bars(first=date(2026, 9, 17), last=date(2026, 12, 16), price=340.0, skip=()):
     out, d = [], first
     while d <= last:
         if sessions.is_session(d) and d not in skip:
@@ -225,21 +231,52 @@ async def test_nothing_due_makes_no_call():
 
 
 @pytest.mark.asyncio
-async def test_scores_three_horizons_after_refresh():
+async def test_scores_every_horizon_after_refresh():
+    """One verdict, the five target nights in order: 2 + 1 + 1 + 1 rows."""
     pool, engine = JournalPool([verdict()]), DataEngine()
     state = state_for(pool, engine)
     first = await run(state, NIGHT_0928)
     assert first["scored"] == 2 and first["refreshed"] == 1
     rows = pool.rows_for("AAPL")
-    one, five = rows[(verdict()["id"], 1)], rows[(verdict()["id"], 5)]
-    assert one["session_date"] == date(2026, 9, 22) and five["session_date"] == date(2026, 9, 28)
+    one = rows[(verdict()["id"], 1)]
     assert one["ask_session_bars"] == 1                 # the 15:30 ET bar only
     from decimal import Decimal
     assert one["return_pct"] == Decimal("0.310")        # (340 − 338.95) / 338.95
     assert one["stop_hit"] is False and one["r_multiple"] == Decimal("0.117")   # 1.05 / 8.95
-    third = await run(state, NIGHT_1019)
-    assert third["scored"] == 1
-    assert pool.rows_for("AAPL")[(verdict()["id"], 20)]["session_date"] == date(2026, 10, 19)
+    for h in (20, 30, 60):
+        assert (await run(state, TARGET_NIGHTS[h]))["scored"] == 1, h
+    rows = pool.rows_for("AAPL")
+    assert {h: rows[(verdict()["id"], h)]["session_date"] for h in TARGET_DATES} == TARGET_DATES
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("horizon", sessions.HORIZONS)
+async def test_each_horizon_is_scored_on_its_target_night(horizon):
+    """Only the horizons due that night; each row names its session N."""
+    pool, engine = JournalPool([verdict()]), DataEngine()
+    got = await run(state_for(pool, engine), TARGET_NIGHTS[horizon])
+    rows = pool.rows_for("AAPL")
+    assert (verdict()["id"], horizon) in rows
+    assert rows[(verdict()["id"], horizon)]["session_date"] == TARGET_DATES[horizon]
+    due = {h for h in TARGET_DATES if TARGET_DATES[h] <= TARGET_NIGHTS[horizon].date()
+           and len(sessions.sessions_after(TARGET_DATES[h], TARGET_NIGHTS[horizon].date())) <= 10}
+    assert {h for _, h in rows} == due and got["scored"] == len(due)
+
+
+@pytest.mark.asyncio
+async def test_horizon_60_is_selected_within_window():
+    """+60 for a 09-21 ask is due on 12-15, 85 calendar days later — past the
+    old 60-day pre-filter, inside the 110-day one. A verdict asked 111 days
+    before the night is outside it."""
+    night = TARGET_NIGHTS[60]
+    old = verdict("OLD", 2, asked=night - timedelta(days=111))
+    pool, engine = JournalPool([verdict(), old]), DataEngine()
+    got = await run(state_for(pool, engine), night)
+    (_, _, args), = pool.statements("FROM ai.verdicts v")
+    assert args[1] == night.astimezone(timezone.utc) - timedelta(days=110) and args[2] == 5
+    assert (night.astimezone(timezone.utc) - verdict()["asked_at"]).days == 85
+    assert set(pool.rows_for("AAPL")) == {(verdict()["id"], 60)} and got["scored"] == 1
+    assert "OLD" not in engine.refreshes()
 
 
 @pytest.mark.asyncio
@@ -257,9 +294,10 @@ async def test_rerun_is_a_noop():
 async def test_expired_horizon_is_never_refreshed():
     engine = DataEngine()
     pool = JournalPool([verdict()])
-    # +20 targets 10-19; 11-02 is 10 sessions after it (still due), 11-03 is 11.
-    got = await run(state_for(pool, engine), datetime(2026, 11, 3, 17, 30, tzinfo=ET))
-    assert got["expired"] == 3 and got["due"] == 0 and engine.calls == []
+    # +60 targets 12-15; 12-30 is 10 sessions after it (still due), 12-31 is
+    # 11 — and every earlier horizon is older still. 101 days: in the window.
+    got = await run(state_for(pool, engine), datetime(2026, 12, 31, 17, 30, tzinfo=ET))
+    assert got["expired"] == 5 and got["due"] == 0 and engine.calls == []
 
 
 # ── Refresh answers ──────────────────────────────────────────────

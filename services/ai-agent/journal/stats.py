@@ -19,7 +19,7 @@ from typing import Optional
 from journal import sessions
 
 VERDICTS = ("go", "wait", "avoid")
-HORIZONS = (1, 5, 20)
+HORIZONS = sessions.HORIZONS
 BUCKETS = ((0, 49), (50, 59), (60, 69), (70, 79), (80, 89), (90, 100))
 
 

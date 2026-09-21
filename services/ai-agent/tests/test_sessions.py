@@ -79,25 +79,39 @@ def test_entry_session_rejects_naive_datetimes():
 
 # ── Counting ─────────────────────────────────────────────────────
 
-def test_horizon_counts_xnys_sessions_not_calendar_days():
+# The two AAPL verdicts (spec 4.5 decision 4): day 0 = 2026-09-21. +30 and
+# +60 cross Thanksgiving (11-26) and Christmas (12-25).
+AAPL_TARGETS = {1: date(2026, 9, 22), 5: date(2026, 9, 28), 20: date(2026, 10, 19),
+                30: date(2026, 11, 2), 60: date(2026, 12, 15)}
+
+
+def test_horizons_are_the_five():
+    assert sessions.HORIZONS == (1, 5, 20, 30, 60) == tuple(AAPL_TARGETS)
+
+
+@pytest.mark.parametrize("horizon", sessions.HORIZONS)
+def test_horizon_counts_xnys_sessions_not_calendar_days(horizon):
     assert sessions.nth_session(date(2026, 11, 25), 1) == date(2026, 11, 27)
     assert sessions.nth_session(date(2026, 11, 20), 5) == date(2026, 11, 30)
     assert sessions.sessions_after(date(2026, 11, 24), date(2026, 11, 30)) == [
         date(2026, 11, 25), date(2026, 11, 27), date(2026, 11, 30)]
-    # The two AAPL verdicts (spec 4.5 decision 4): day 0 = 2026-09-21.
-    assert [sessions.nth_session(date(2026, 9, 21), n) for n in (1, 5, 20)] == [
-        date(2026, 9, 22), date(2026, 9, 28), date(2026, 10, 19)]
+    target = sessions.nth_session(date(2026, 9, 21), horizon)
+    assert target == AAPL_TARGETS[horizon]
+    assert len(sessions.sessions_after(date(2026, 9, 21), target)) == horizon
+    assert (target - date(2026, 9, 21)).days > horizon or horizon == 1
 
 
-def test_horizon_expires_after_10_sessions():
+@pytest.mark.parametrize("horizon", sessions.HORIZONS)
+def test_horizon_expires_after_10_sessions(horizon):
     day0 = date(2026, 9, 21)
-    target = date(2026, 9, 22)                        # +1
-    assert sessions.horizon_state(day0, 1, date(2026, 9, 21)) == (sessions.NOT_DUE, target)
-    assert sessions.horizon_state(day0, 1, target) == (sessions.DUE, target)
+    target = AAPL_TARGETS[horizon]
+    before = sessions.nth_session(day0, horizon - 1) if horizon > 1 else day0
+    assert sessions.horizon_state(day0, horizon, before) == (sessions.NOT_DUE, target)
+    assert sessions.horizon_state(day0, horizon, target) == (sessions.DUE, target)
     tenth = sessions.nth_session(target, 10)
-    assert sessions.horizon_state(day0, 1, tenth) == (sessions.DUE, target)
+    assert sessions.horizon_state(day0, horizon, tenth) == (sessions.DUE, target)
     eleventh = sessions.nth_session(target, 11)
-    assert sessions.horizon_state(day0, 1, eleventh) == (sessions.EXPIRED, target)
+    assert sessions.horizon_state(day0, horizon, eleventh) == (sessions.EXPIRED, target)
 
 
 def test_latest_closed_session():

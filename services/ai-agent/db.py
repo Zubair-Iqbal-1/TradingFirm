@@ -225,9 +225,10 @@ async def bump_served(pool: asyncpg.Pool, verdict_id: str, now) -> None:
 
 # ── ai.verdict_outcomes — the journal (Part 4.5) ─────────────────
 
-# Verdicts with at least one horizon unscored, asked since $2 — a cheap
-# pre-filter; the runner drops expired horizons by the calendar (spec 4.5
-# decision 5). `scored` lists the horizons that already have a row.
+# Verdicts with at least one horizon unscored ($3 = how many horizons there
+# are), asked since $2 — a cheap pre-filter; the runner drops expired
+# horizons by the calendar (spec 4.5 decision 5). `scored` lists the
+# horizons that already have a row.
 DUE_VERDICTS_SQL = """
 SELECT v.id, v.ticker, v.asked_at, v.entry, v.plan_proposed,
        COALESCE(array_agg(o.horizon_days) FILTER (WHERE o.horizon_days IS NOT NULL),
@@ -236,14 +237,14 @@ FROM ai.verdicts v
 LEFT JOIN ai.verdict_outcomes o ON o.verdict_id = v.id
 WHERE v.user_id = $1::uuid AND v.asked_at >= $2
 GROUP BY v.id
-HAVING count(o.verdict_id) < 3
+HAVING count(o.verdict_id) < $3
 ORDER BY v.asked_at ASC, v.id ASC
 """
 
 
-async def due_verdicts(pool: asyncpg.Pool, user_id: str, since) -> list[dict]:
+async def due_verdicts(pool: asyncpg.Pool, user_id: str, since, horizons: int) -> list[dict]:
     async with pool.acquire() as conn:
-        rows = await conn.fetch(DUE_VERDICTS_SQL, user_id, since)
+        rows = await conn.fetch(DUE_VERDICTS_SQL, user_id, since, horizons)
     out = []
     for row in rows:
         item = dict(row)

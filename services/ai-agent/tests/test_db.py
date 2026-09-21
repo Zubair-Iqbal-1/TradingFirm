@@ -149,11 +149,11 @@ async def test_due_verdicts_query_and_decoding():
     row = {"id": "11111111-1111-4111-8111-111111111111", "ticker": "AAPL", "asked_at": NOW,
            "entry": Decimal("338.95"), "plan_proposed": json.dumps({"stop": 1}), "scored": [5, 1]}
     pool = FakePool({"FROM ai.verdicts v": [row]})
-    got = await db.due_verdicts(pool, db.DEV_USER_ID, since)
+    got = await db.due_verdicts(pool, db.DEV_USER_ID, since, 5)
     assert got == [{**row, "plan_proposed": {"stop": 1}, "scored": [1, 5]}]
     (_, sql, args), = pool.calls
-    assert args == (db.DEV_USER_ID, since)
-    assert "HAVING count(o.verdict_id) < 3" in sql and "ORDER BY v.asked_at ASC" in sql
+    assert args == (db.DEV_USER_ID, since, 5)
+    assert "HAVING count(o.verdict_id) < $3" in sql and "ORDER BY v.asked_at ASC" in sql
 
 
 def _outcome(h):

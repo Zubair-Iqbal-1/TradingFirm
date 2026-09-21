@@ -94,11 +94,27 @@ def test_migration_007_is_frozen():
 
 def test_migration_008_is_rerunnable(sql008):
     statements = [s.strip() for s in sql008.split(";") if s.strip()]
-    assert len(statements) == 4
-    for statement in statements:
+    assert len(statements) == 5
+    for statement in statements[:4]:
         assert statement.startswith("ALTER TABLE ai.verdict_outcomes ADD COLUMN IF NOT EXISTS "), statement
         assert "NOT NULL" not in statement, "nullable: a plan-less verdict leaves columns NULL"
-    assert not re.search(r"\b(DROP|TRUNCATE|DELETE|UPDATE|INSERT|CREATE)\b", sql008)
+    # The horizon CHECK: dropped IF EXISTS and re-added in ONE statement, so a
+    # rerun repeats it and a failure can never leave the table without it.
+    widen = statements[4]
+    assert widen.startswith("ALTER TABLE ai.verdict_outcomes")
+    assert "DROP CONSTRAINT IF EXISTS verdict_outcomes_horizon_days_check," in widen
+    assert "ADD CONSTRAINT verdict_outcomes_horizon_days_check" in widen
+    rest = sql008.replace("DROP CONSTRAINT IF EXISTS verdict_outcomes_horizon_days_check", "")
+    assert not re.search(r"\b(DROP|TRUNCATE|DELETE|UPDATE|INSERT|CREATE)\b", rest)
+
+
+def test_migration_008_horizons_match_the_code(sql, sql008):
+    """007 allowed (1, 5, 20) and stays as it is; 008 widens the CHECK to the
+    five horizons the scorer uses, and the two lists must stay one."""
+    from journal import sessions
+    assert re.search(r"horizon_days\s+INTEGER NOT NULL CHECK \(horizon_days IN \(1, 5, 20\)\)", sql)
+    allowed = re.search(r"CHECK \(horizon_days IN \(([\d, ]+)\)\)", sql008).group(1)
+    assert tuple(int(h) for h in allowed.split(",")) == sessions.HORIZONS == (1, 5, 20, 30, 60)
 
 
 def test_migration_008_adds_the_four_journal_columns(sql008):

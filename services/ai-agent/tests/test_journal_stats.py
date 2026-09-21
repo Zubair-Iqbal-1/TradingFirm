@@ -42,27 +42,35 @@ def group(answer, verdict, h, model=SONNET):
 
 # ── The numbers ──────────────────────────────────────────────────
 
-def test_hit_rate_by_verdict():
-    rows = [row(1, "go", ret="2.000"), row(2, "go", ret="-1.000"), row(3, "go", ret="0.000"),
-            row(4, "avoid", ret="-1.000"), row(5, "avoid", ret="0.500"),
-            row(6, "wait", ret="3.000")]
+@pytest.mark.parametrize("h", stats.HORIZONS)
+def test_hit_rate_by_verdict(h):
+    rows = [row(1, "go", h=h, ret="2.000"), row(2, "go", h=h, ret="-1.000"),
+            row(3, "go", h=h, ret="0.000"), row(4, "avoid", h=h, ret="-1.000"),
+            row(5, "avoid", h=h, ret="0.500"), row(6, "wait", h=h, ret="3.000")]
     got = stats.compute(rows, NOW, 90)
-    go = group(got, "go", 1)
+    go = group(got, "go", h)
     assert go["hitRate"] == 0.333, "0 is a miss"
     assert go["meanReturnPct"] == 0.333 and go["medianReturnPct"] == 0.0
-    assert group(got, "avoid", 1)["hitRate"] == 0.5
-    wait = group(got, "wait", 1)
+    assert group(got, "avoid", h)["hitRate"] == 0.5
+    wait = group(got, "wait", h)
     assert wait["hitRate"] is None and wait["meanReturnPct"] == 3.0
+
+
+def test_stats_cover_every_horizon():
+    got = stats.compute([row(1)], NOW, 90)["models"][0]
+    five = ["1", "5", "20", "30", "60"]
+    assert all(list(got["byVerdict"][v]) == five for v in stats.VERDICTS)
+    assert list(got["calibration"]) == five
 
 
 def test_pending_and_expired_counted_apart():
     """Asked 09-21 after the close; NOW = 10-07. +1 (09-22) is 11 sessions
-    old → expired; +5 (09-28) is 7 → pending; +20 (10-19) not due → pending."""
+    old → expired; +5 (09-28) is 7 → pending; +20 / +30 / +60 not due → pending."""
     got = stats.compute([unscored(1)], NOW, 90)
-    assert [group(got, "go", h)["expired"] for h in (1, 5, 20)] == [1, 0, 0]
-    assert [group(got, "go", h)["pending"] for h in (1, 5, 20)] == [0, 1, 1]
+    assert [group(got, "go", h)["expired"] for h in stats.HORIZONS] == [1, 0, 0, 0, 0]
+    assert [group(got, "go", h)["pending"] for h in stats.HORIZONS] == [0, 1, 1, 1, 1]
     assert all(group(got, "go", h)["scored"] == 0 and group(got, "go", h)["asked"] == 1
-               for h in (1, 5, 20))
+               for h in stats.HORIZONS)
     one = group(got, "go", 1)
     assert one["hitRate"] is None and one["meanReturnPct"] is None, "null, never 0"
 
@@ -94,11 +102,12 @@ def test_stats_never_mix_models():
     assert [b["n"] for b in glm_cal if b["bucket"] == "80-89"] == [1]
 
 
-def test_calibration_bucket_edges():
-    rows = [row(i, verdict="go", ret="1.000", confidence=c) for i, c in
+@pytest.mark.parametrize("h", stats.HORIZONS)
+def test_calibration_bucket_edges(h):
+    rows = [row(i, verdict="go", h=h, ret="1.000", confidence=c) for i, c in
             enumerate((49, 50, 89, 90, 100), start=1)]
-    rows.append(row(9, verdict="wait", ret="1.000", confidence=55))        # waits never count
-    cal = stats.compute(rows, NOW, 90)["models"][0]["calibration"]["1"]
+    rows.append(row(9, verdict="wait", h=h, ret="1.000", confidence=55))   # waits never count
+    cal = stats.compute(rows, NOW, 90)["models"][0]["calibration"][str(h)]
     assert {b["bucket"]: b["n"] for b in cal} == {
         "0-49": 1, "50-59": 1, "60-69": 0, "70-79": 0, "80-89": 1, "90-100": 2}
     top = next(b for b in cal if b["bucket"] == "90-100")

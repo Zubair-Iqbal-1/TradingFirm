@@ -1,7 +1,7 @@
 """
 TradingFirm — XNYS sessions for the journal (Part 4.5).
 
-`exchange_calendars` is the counter: +1 / +5 / +20 are XNYS sessions, never
+`exchange_calendars` is the counter: +1 / +5 / +20 / +30 / +60 are XNYS sessions, never
 calendar days or weekdays (spec 4.5 decision 3). Bar dates are the second
 check, in the runner.
 
@@ -38,6 +38,10 @@ REBUILD_MARGIN_DAYS = 60
 SLOT_TIME = time(17, 30)        # ET, every XNYS session (decision 2)
 DEADLINE_TIME = time(18, 10)    # ET: no refresh starts after this
 EXPIRY_SESSIONS = 10            # a horizon is dropped this many sessions after its target
+# The horizons every verdict is scored at, in XNYS sessions. The one list:
+# the runner, the stats and db.due_verdicts read it, and 008's CHECK is
+# pinned to it (test_migration_008_horizons_match_the_code).
+HORIZONS = (1, 5, 20, 30, 60)
 HOUR = timedelta(hours=1)
 
 
