@@ -114,3 +114,27 @@ Part 9.3 — Telegram alert on a missed heartbeat), this check is manual. Log
 every Wi-Fi drop you notice (rough time + how long) in a note somewhere so
 Part 9.3's alerting threshold can be tuned against real gaps instead of a
 guess.
+
+## Missed slots
+
+risk-shield's night checks (Part 3.4b) have **155 slots in a full week**. A week runs from Sunday evening to Friday: Sun 18:15–23:45 ET (12 slots), Mon–Thu (31 each), Fri 00:15–16:45 (19). A slot is **missed** if it has no `risk.health_checks` row, or if its row's `overlay.status` is `unavailable` (the check ran but had no futures quotes). Add one row per week. A week with 0 missed still gets a row.
+
+| week | expected | missed | cause |
+|---|---|---|---|
+| 2026-09-14 → 09-18 | 125 (night checks went live Mon 09-14 16:24 ET, so the first slot was 16:45; a full week is 155) | 0 | — |
+| 2026-09-20 → 09-25 (open) | 155 | 1 | Mon 09-21 04:15 ET: yfinance returned nothing for `ES=F` and `NQ=F` and the Finnhub news poll timed out in the same seconds. Host network blip, no action (`docs/decisions.md` 2026-09-21). |
+
+To count a week, run this read-only query on prod (replace the two dates):
+
+```sql
+SELECT to_char(checked_at AT TIME ZONE 'America/New_York', 'Dy YYYY-MM-DD') AS et_date,
+       count(*) AS rows,
+       count(*) FILTER (WHERE indicators->'overlay'->>'status' = 'unavailable') AS unavailable
+FROM risk.health_checks
+WHERE indicators->>'kind' = 'night'
+  AND checked_at >= '2026-09-20 00:00 America/New_York'
+  AND checked_at <  '2026-09-26 00:00 America/New_York'
+GROUP BY 1 ORDER BY min(checked_at);
+```
+
+A full day has Sun 12, Mon–Thu 31 and Fri 19 rows. A day short of that is missing slots; list them before recording a cause.
