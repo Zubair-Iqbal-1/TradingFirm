@@ -854,3 +854,13 @@ Three things lean on it: the month-to-date cost total, the 40-day daily history,
 **Why:** every payload in this repo is camelCase (`CLAUDE.md` conventions, `scanners/models.py` aliases every field), and the value is written straight to a JSONB column that 4.4 reads back — a single snake_case key there would be the only one in the schema.
 
 **Supersedes:** the field name in plan row 4.2. Plan files are read-only; this entry is the change.
+
+---
+
+## 2026-09-21 — ai-agent's in-process call counters are one `MemoryCap` per counter, not one shared instance
+
+**Decision:** when Redis is down, each daily counter falls back to its **own** `MemoryCap` object — the provider owns the global cap's, the classifier owns its own (`app.state.memory_caps`, keyed by state name). The keyword-only `name=` on `day_counter_key` / `reserve_call` / `release_call` selects the **Redis** key only, as spec 4.2 approved; `MemoryCap` stays keyed by the bare ET day.
+
+**Why:** spec 4.2 approved `name=` and promised 4.1's callers and tests unchanged, but did not say how the in-process fallback tells two counters apart. Prefixing `MemoryCap`'s keys with the counter name was tried first and broke three 4.1 assertions that read `MemoryCap.count(<ET day>)`. A second instance keeps that promise with no key scheme at all, and a namespaced key would only restate which object owns it.
+
+**Supersedes:** nothing. It fills a gap in spec 4.2 rather than changing an approved decision; the spec now carries an as-built note.
