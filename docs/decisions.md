@@ -864,3 +864,27 @@ Three things lean on it: the month-to-date cost total, the 40-day daily history,
 **Why:** spec 4.2 approved `name=` and promised 4.1's callers and tests unchanged, but did not say how the in-process fallback tells two counters apart. Prefixing `MemoryCap`'s keys with the counter name was tried first and broke three 4.1 assertions that read `MemoryCap.count(<ET day>)`. A second instance keeps that promise with no key scheme at all, and a namespaced key would only restate which object owns it.
 
 **Supersedes:** nothing. It fills a gap in spec 4.2 rather than changing an approved decision; the spec now carries an as-built note.
+
+---
+
+## 2026-09-21 — The 00:15 ET futures drop is gone after the Sep expiry; 3.4c.1 is not built
+
+**Decision:** 3.4c.1 is skipped: no special-case for the 00:15 ET night slot. The fix for contract-roll effects is **contract-aware futures, in December** (before the Dec expiry), not a patch to one slot.
+
+Readings from prod `risk.health_checks` night rows. `esPct` / `nqPct` are the overlay's move since the latest settle, in %.
+
+| night (ET) | ES 23:45 | ES 00:15 | ΔES | NQ 23:45 | NQ 00:15 | ΔNQ |
+|---|---|---|---|---|---|---|
+| Mon 09-14 → Tue 09-15 | −0.042 | −0.861 | −0.819 | −0.017 | −1.018 | −1.001 |
+| Tue 09-15 → Wed 09-16 | 0.124 | −0.949 | −1.073 | 0.109 | −1.096 | −1.206 |
+| Wed 09-16 → Thu 09-17 | 0.607 | −0.853 | −1.460 | 0.609 | −1.041 | −1.650 |
+| Thu 09-17 → Fri 09-18 | 0.026 | −0.879 | −0.905 | −0.024 | −0.999 | −0.975 |
+| **Sun 09-20 → Mon 09-21** (after the Sep expiry, Fri 09-18) | 0.272 | 0.269 | **−0.003** | 0.489 | 0.468 | **−0.022** |
+
+On all four pre-expiry nights the 00:15 reading sat at ES −0.85…−0.95 / NQ −1.00…−1.10, a 30-minute step of −0.82…−1.46 (ES) and −0.98…−1.65 (NQ). The first post-expiry night shows no step. No overlay cap fired on any of the five nights.
+
+**Why:** the drop ended with the September contract, so it was tied to that contract rather than to the slot. The same can recur at the December roll, which is why the fix is contract-aware futures and not an exception for 00:15.
+
+**Also recorded:** the 09-21 04:15 ET night slot is one missed slot, with no action. yfinance returned no data for both contracts and the Finnhub news poll timed out in the same seconds, which points to a host network blip rather than a provider fault. The 04:45 slot recovered.
+
+**Supersedes:** nothing. 3.4c.1 was never specified in the repo; this entry is its only record.
