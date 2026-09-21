@@ -301,3 +301,37 @@ async def score_once(state, settings, *, deadline: Optional[datetime] = None,
                 await redis.delete(LOCK_KEY)
             except Exception as e:
                 logger.warning(f"journal lock release failed (expires in {LOCK_TTL} s): {e!r}")
+
+
+# ── The nightly loop ─────────────────────────────────────────────
+
+async def run_loop(state, settings, *, clock: Callable[[], datetime] = _utc_now,
+                   sleep: Callable[[float], Awaitable[None]] = asyncio.sleep) -> None:
+    """17:30 ET on every XNYS session, forever (spec 4.5 decision 10).
+
+    Waits only through wallclock.sleep_until: Docker's monotonic clock stops
+    while the Mac sleeps. No boot pass and no catch-up pass: "due" needs no
+    memory of past slots, so a slot slept through is caught by the next one,
+    and a restart spends nothing. A pass that raises is logged and the loop
+    goes on; cancellation (shutdown) propagates.
+    """
+    import wallclock
+
+    logger.info("journal scoring loop running: 17:30 ET on XNYS sessions")
+    while True:
+        session, slot = sessions.next_slot(clock())
+        wake = await wallclock.sleep_until(slot, clock=clock, sleep=sleep, log=logger)
+        deadline = sessions.deadline_at(session)
+        if wake.now >= deadline:
+            logger.warning(f"journal: the {session} slot was missed (woke {wake.now.isoformat()}); "
+                           f"the next slot scores whatever it left due")
+            continue
+        try:
+            result = await score_once(state, settings, deadline=deadline, clock=clock, sleep=sleep)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error(f"journal: the {session} pass raised {type(e).__name__}: {e}")
+            result = {**new_result(), "stoppedBy": f"error: {type(e).__name__}"}
+        state.journal_last_run_at = wake.now.isoformat()
+        state.journal_last_result = result

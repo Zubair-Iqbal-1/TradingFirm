@@ -230,3 +230,45 @@ def test_health_reports_caps_and_a_bool_for_the_key(monkeypatch, no_http):
     assert "key" not in str(body).lower() or body["llmConfigured"] is False
     for value in body.values():
         assert "sk-" not in str(value)
+
+
+# ── Part 4.5: the journal task ───────────────────────────────────
+
+def test_scoring_loop_off_when_disabled(monkeypatch, no_http):
+    from journal import runner
+    started = []
+    monkeypatch.setattr(runner, "run_loop", lambda *a, **kw: started.append(1))
+    monkeypatch.setattr(main.settings, "journal_scoring_enabled", False)
+    with TestClient(main.app) as client:
+        assert main.app.state.journal_task is None
+        body = client.get("/health").json()
+    assert started == []
+    assert body["journalScoringEnabled"] is False
+    assert body["journalLastRunAt"] is None and body["journalLastResult"] is None
+
+
+def test_restart_spends_nothing(monkeypatch, no_http):
+    """Flag on: the task starts and waits for the next slot. No boot pass —
+    score_once is never called at startup — and shutdown cancels it."""
+    from journal import runner
+    passes, cancelled = [], []
+
+    async def never(*a, **kw):
+        passes.append(1)
+
+    async def fake_loop(state, settings):
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            cancelled.append(1)
+            raise
+
+    monkeypatch.setattr(runner, "score_once", never)
+    monkeypatch.setattr(runner, "run_loop", fake_loop)
+    monkeypatch.setattr(main.settings, "journal_scoring_enabled", True)
+    with TestClient(main.app) as client:
+        task = main.app.state.journal_task
+        assert task is not None and not task.done()
+        assert client.get("/health").json()["journalScoringEnabled"] is True
+    assert passes == [] and cancelled == [1]
+    assert main.app.state.journal_task is None

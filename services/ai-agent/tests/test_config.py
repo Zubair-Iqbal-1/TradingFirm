@@ -139,3 +139,17 @@ def test_classifier_cap_default_is_smaller_than_the_global_one():
 def test_data_engine_defaults_are_the_prod_service():
     assert Settings.model_fields["data_engine_url"].default == "http://data-engine:8001"
     assert Settings.model_fields["data_engine_timeout"].default == 10.0
+
+
+def test_twin_never_scores_on_a_schedule():
+    """The ninth lock (Part 4.5). The journal scorer refreshes tickers through
+    data-engine on a 17:30 ET slot; the twin must never run it by itself.
+    Hard-coded "false" in the ai-agent-dev block — the code default being
+    false too is not enough, so the env line itself is asserted."""
+    import os
+    assert os.environ.get("JOURNAL_SCORING_ENABLED") == "false"
+    assert Settings().journal_scoring_enabled is False
+
+
+def test_journal_default_is_off():
+    assert Settings.model_fields["journal_scoring_enabled"].default is False

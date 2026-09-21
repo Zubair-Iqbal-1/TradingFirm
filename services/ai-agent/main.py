@@ -42,6 +42,7 @@ import db
 import ledger
 import prompts
 from config import settings
+from journal import runner as journal_runner
 from providers.base import (
     LLMBadResponse,
     LLMCapExceeded,
@@ -145,9 +146,28 @@ async def lifespan(app: FastAPI):
         f"model={settings.llm_model}, classifier={settings.llm_model_classifier})"
     )
 
+    # The journal scorer (Part 4.5): one task, only where the flag is on. It
+    # sleeps until the next 17:30 ET slot, so starting it spends nothing.
+    app.state.journal_last_run_at = None
+    app.state.journal_last_result = None
+    app.state.journal_task = None
+    if settings.journal_scoring_enabled:
+        app.state.journal_task = asyncio.create_task(journal_runner.run_loop(app.state, settings))
+        logger.info("Journal scoring enabled (17:30 ET on XNYS sessions)")
+    else:
+        logger.info("Journal scoring disabled")
+
     yield
 
     logger.info("Shutting down AI Agent...")
+    task = getattr(app.state, "journal_task", None)
+    if task is not None:
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
+        app.state.journal_task = None
     if app.state.http is not None:
         await app.state.http.aclose()
     if app.state.redis is not None:
@@ -201,6 +221,10 @@ async def health():
             "llmDaily": settings.llm_daily_call_cap,
             "classifierDaily": settings.llm_classifier_daily_call_cap,
         },
+        # Part 4.5: in-process only, lost on a restart.
+        "journalScoringEnabled": settings.journal_scoring_enabled,
+        "journalLastRunAt": getattr(app.state, "journal_last_run_at", None),
+        "journalLastResult": getattr(app.state, "journal_last_result", None),
     }
 
 
