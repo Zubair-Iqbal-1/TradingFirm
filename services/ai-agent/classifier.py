@@ -131,7 +131,10 @@ class ClassifierError(Exception):
 
 
 class BatchRejected(ClassifierError):
-    """The answer broke the item contract. The whole batch is rejected."""
+    """The answer broke the item contract. The whole batch is rejected.
+    `result` is the paid-for LLMResult, set by classify() (Part 4.4)."""
+
+    result: Optional[LLMResult] = None
 
 
 # ── Prompt ───────────────────────────────────────────────────────
@@ -331,14 +334,22 @@ async def classify(
         provider, redis, memory_cap, to_send, model=model, cap=cap, now=now,
         known_event_keys=known_event_keys,
     )
-    answers = validate_answer(result.data, len(to_send))
+    # The call is paid for whatever it answered, so its cost is counted
+    # before the answer is judged (Part 4.4; 4.2 counted it after, which left
+    # a rejected batch out of the day's total). A rejection carries the
+    # result out with it, so the route can still write the ledger row.
+    await cache.record_cost(redis, memory_cost, result.usage.get("cost"), now)
+    try:
+        answers = validate_answer(result.data, len(to_send))
+    except BatchRejected as e:
+        e.result = result
+        raise
 
     classified_at = (now or datetime.now(timezone.utc)).isoformat()
     fresh = {
         digest: {**answer, "model": result.model[:MODEL_MAX], "classifiedAt": classified_at}
         for digest, answer in zip(wanted, answers)
     }
-    await cache.record_cost(redis, memory_cost, result.usage.get("cost"), now)
     await cache.store_classifications(redis, fresh)
 
     logger.info(
@@ -377,3 +388,45 @@ async def write_back(http, base_url: str, ids: list[Optional[int]], results: lis
         written += 1 if outcome.ok else 0
         errors += 0 if outcome.ok else 1
     return written, errors
+
+
+# ── The ledger (Part 4.4) ────────────────────────────────────────
+#
+# Which day counters a classifier call counted against. Both, except the one
+# post-wire error the reservation rule releases: LLMAuthFailed subclasses
+# LLMNotConfigured, so _call_model gives the classifier's reservation back
+# while the provider's global one stays. The ledger seeds both counters at
+# startup, so its rows have to say the same thing the counters did.
+
+COUNTERS = [cache.STATE_LLM_CALLS, cache.STATE_CLASSIFIER_CALLS]
+
+
+async def record_success(pool, redis, result: LLMResult, *, route: str,
+                         ticker: Optional[str] = None, user_id: Optional[str] = None) -> bool:
+    import ledger
+    return await ledger.record(pool, redis, ledger.build(
+        route=route, label=LABEL, model=result.model, outcome=ledger.OUTCOME_OK,
+        counters=COUNTERS, result=result, ticker=ticker, user_id=user_id,
+    ))
+
+
+async def record_failure(pool, redis, error: BaseException, *, route: str,
+                         model: Optional[str] = None, ticker: Optional[str] = None,
+                         user_id: Optional[str] = None) -> bool:
+    """A ledger row for a classifier call that failed after the wire; nothing
+    for one that never left. A rejected batch was answered and paid for, so
+    its row carries the usage and reads `bad_response`."""
+    import ledger
+    from providers.base import LLMAuthFailed
+
+    common = dict(route=route, label=LABEL, model=model or "unknown",
+                  ticker=ticker, user_id=user_id)
+    if isinstance(error, BatchRejected):
+        return await ledger.record(pool, redis, ledger.build(
+            outcome="bad_response", counters=COUNTERS, result=error.result, **common))
+    outcome = ledger.outcome_of(error)
+    if outcome is None:
+        return False
+    counters = [cache.STATE_LLM_CALLS] if type(error) is LLMAuthFailed else COUNTERS
+    return await ledger.record(pool, redis, ledger.build(
+        outcome=outcome, counters=counters, **common))

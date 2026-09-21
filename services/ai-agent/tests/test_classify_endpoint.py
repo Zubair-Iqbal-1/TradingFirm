@@ -27,6 +27,7 @@ from providers.base import (
     LLMRejected,
     LLMUnavailable,
 )
+from tests.fake_pool import FakePool
 from tests.test_cache import FakeRedis
 from tests.test_classifier import MODEL, StubProvider, answer
 
@@ -50,11 +51,14 @@ TEST_CAP = 40
 @pytest.fixture
 def client(monkeypatch):
     saved = {k: getattr(main.app.state, k, None)
-             for k in ("redis", "memory_caps", "memory_cost", "provider", "http")}
+             for k in ("redis", "memory_caps", "memory_cost", "provider", "http", "db_pool")}
     monkeypatch.setattr(main.settings, "llm_classifier_daily_call_cap", TEST_CAP)
     monkeypatch.setattr(main.settings, "llm_model_classifier", MODEL)
 
-    def _make(provider=None, redis=None, handler=None):
+    def _make(provider=None, redis=None, handler=None, pool=None):
+        # Part 4.4: every wire call writes a ledger row, so the default is a
+        # pool that accepts one; `pool=False` is the no-database case.
+        main.app.state.db_pool = None if pool is False else (pool or FakePool())
         main.app.state.provider = provider
         main.app.state.redis = redis
         main.app.state.memory_caps = {
@@ -439,3 +443,72 @@ def test_bad_known_key_is_422(client, keys):
     assert resp.status_code == 422
     assert p.calls == []
     assert not any("classifier_calls" in k for k in r.store)
+
+
+# ── Part 4.4: the ledger ─────────────────────────────────────────
+
+def _ledger_rows(pool):
+    import db
+    return [dict(zip(db.LLM_CALL_COLUMNS, c[2])) for c in pool.statements("ai.llm_calls")]
+
+
+def test_classify_route_writes_ledger_row(client):
+    handler, _ = recorder()
+    pool = FakePool()
+    c = client(provider=StubProvider(answer(2)), redis=FakeRedis(), handler=handler, pool=pool)
+    assert c.post("/classify/headlines", json=body(2)).status_code == 200
+
+    (row,) = _ledger_rows(pool)
+    assert (row["route"], row["label"], row["outcome"]) == ("classify", "headline_classify", "ok")
+    assert (row["tokens_in"], row["tokens_out"], float(row["cost_usd"])) == (812, 410, 0.0057)
+    assert row["counters"] == ["llm_calls", "classifier_calls"]
+    assert row["ticker"] is None and row["verdict_id"] is None
+
+    # All cached: no LLM request, so no row.
+    assert c.post("/classify/headlines", json=body(2)).json()["classified"] == 0
+    assert len(_ledger_rows(pool)) == 1
+
+
+@pytest.mark.parametrize("error, outcome, counters", [
+    (LLMRateLimited("429"), "rate_limited", ["llm_calls", "classifier_calls"]),
+    (LLMUnavailable("down"), "unavailable", ["llm_calls", "classifier_calls"]),
+    (LLMRefused("no"), "refused", ["llm_calls", "classifier_calls"]),
+    # The classifier's reservation is released on an auth failure (4.2's
+    # rule), the global one is not: the row says exactly that.
+    (LLMAuthFailed("401"), "auth_failed", ["llm_calls"]),
+])
+def test_post_wire_failure_writes_ledger_row(client, error, outcome, counters):
+    pool = FakePool()
+    c = client(provider=StubProvider(raises=error), redis=FakeRedis(), pool=pool)
+    assert c.post("/classify/headlines", json=body(1)).status_code in (429, 502, 503)
+    (row,) = _ledger_rows(pool)
+    assert (row["outcome"], row["counters"], row["model"]) == (outcome, counters, MODEL)
+    assert row["tokens_in"] is None and row["cost_usd"] is None
+
+
+@pytest.mark.parametrize("error", [LLMNotConfigured("no key"), LLMCooledDown("cd"),
+                                   LLMCapExceeded("cap")])
+def test_pre_wire_refusal_writes_no_ledger_row(client, error):
+    pool = FakePool()
+    c = client(provider=StubProvider(raises=error), redis=FakeRedis(), pool=pool)
+    assert c.post("/classify/headlines", json=body(1)).status_code in (429, 503)
+    assert _ledger_rows(pool) == []
+
+
+def test_rejected_batch_is_ledgered_with_its_usage_and_its_cost_counted(client):
+    """The answer was paid for even though it is thrown away."""
+    bad = answer(1, items=[{"index": 0, "relevance": "critical", "sentiment": 0,
+                            "category": "other", "oneLine": "x", "eventKey": "a-b"}])
+    pool, r = FakePool(), FakeRedis()
+    c = client(provider=StubProvider(bad), redis=r, pool=pool)
+    assert c.post("/classify/headlines", json=body(1)).status_code == 502
+    (row,) = _ledger_rows(pool)
+    assert (row["outcome"], row["tokens_in"], float(row["cost_usd"])) == ("bad_response", 812, 0.0057)
+    assert float(r.store[f"tf:ai:state:cost_day:{cache.et_day()}"]) == pytest.approx(0.0057)
+
+
+def test_no_pool_never_fails_a_classification(client):
+    r = FakeRedis()
+    c = client(provider=StubProvider(answer(1)), redis=r, pool=False)
+    assert c.post("/classify/headlines", json=body(1)).status_code == 200
+    assert r.store[f"tf:ai:state:ledger_missed:{cache.et_day()}"] == "1"

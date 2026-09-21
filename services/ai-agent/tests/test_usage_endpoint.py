@@ -46,7 +46,8 @@ def test_usage_reports_calls_caps_and_cost(client):
 
     assert body["source"] == "redis"
     assert body["day"] == cache.et_day() and body["month"] == cache.et_month()
-    assert body["calls"] == {"llmToday": 12, "classifierToday": 3, "costMissingToday": 0}
+    assert body["calls"] == {"llmToday": 12, "classifierToday": 3, "costMissingToday": 0,
+                             "ledgerMissedToday": 0}
     assert body["caps"] == {
         "llmDaily": main.settings.llm_daily_call_cap,
         "classifierDaily": main.settings.llm_classifier_daily_call_cap,

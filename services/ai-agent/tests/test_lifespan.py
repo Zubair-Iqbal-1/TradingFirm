@@ -17,7 +17,19 @@ from fastapi.testclient import TestClient
 
 import cache
 import config
+import db
 import main
+
+
+@pytest.fixture(autouse=True)
+def no_database(monkeypatch):
+    """Part 4.4 gave the lifespan a pool. No test here may open a socket to
+    Postgres, so by default the factory fails the way a dead database does;
+    the pool tests below replace it."""
+    async def boom(*a, **kw):
+        raise ConnectionRefusedError("postgres is down")
+
+    monkeypatch.setattr(db, "create_db_pool", boom)
 
 
 @pytest.fixture
@@ -115,16 +127,90 @@ def test_lifespan_redis_close_failure_does_not_break_shutdown(monkeypatch, no_ht
         pass   # exiting the context is the shutdown; it must not raise
 
 
-def test_lifespan_builds_no_database_pool(monkeypatch, no_http):
-    """Spec 4.2 decision 1: no ai.* table is written in this part, so there
-    is no pool. Part 4.4 adds it with migration 005_ai.sql."""
+class FakePool:
+    def __init__(self, close_raises=False):
+        self.closed = False
+        self.close_raises = close_raises
+
+    async def close(self):
+        if self.close_raises:
+            raise RuntimeError("close failed")
+        self.closed = True
+
+
+def _redis_ok(monkeypatch):
     async def fake_create_redis(*a, **kw):
         return FakeRedisClient()
-
     monkeypatch.setattr(cache, "create_redis", fake_create_redis)
 
+
+def test_lifespan_db_down_boots_without_pool(monkeypatch, no_http, caplog):
+    """Fail-open: no pool, the service still boots and says so. /analyze is
+    what refuses (503), not the process."""
+    _redis_ok(monkeypatch)
+    with caplog.at_level("WARNING"):
+        with TestClient(main.app) as client:
+            assert main.app.state.db_pool is None
+            body = client.get("/health").json()
+    assert body["db_connected"] is False
+    assert body["capsSeeded"] is False
+    assert "Database unavailable" in caplog.text
+    assert "caps not seeded from the ledger: no database pool" in caplog.text
+
+
+def test_lifespan_db_hang_is_bounded_by_startup_timeout(monkeypatch, no_http):
+    import asyncio
+    _redis_ok(monkeypatch)
+    monkeypatch.setattr(config, "STARTUP_TIMEOUT", 0.05)
+
+    async def hang(*a, **kw):
+        await asyncio.sleep(30)
+
+    monkeypatch.setattr(db, "create_db_pool", hang)
     with TestClient(main.app):
-        assert getattr(main.app.state, "db_pool", None) is None
+        assert main.app.state.db_pool is None
+
+
+def test_lifespan_opens_pool_seeds_caps_and_closes(monkeypatch, no_http):
+    import ledger
+    _redis_ok(monkeypatch)
+    pool = FakePool()
+    seen = {}
+
+    async def fake_pool(*a, **kw):
+        return pool
+
+    async def fake_seed(p, r, caps, cost, now=None):
+        seen.update(pool=p, redis=r, caps=set(caps))
+        return True
+
+    monkeypatch.setattr(db, "create_db_pool", fake_pool)
+    monkeypatch.setattr(ledger, "seed_caps", fake_seed)
+
+    with TestClient(main.app) as client:
+        assert main.app.state.db_pool is pool
+        body = client.get("/health").json()
+        assert body["db_connected"] is True and body["capsSeeded"] is True
+    assert seen["pool"] is pool
+    assert isinstance(seen["redis"], FakeRedisClient), "seeded after Redis is resolved"
+    assert seen["caps"] == {cache.STATE_LLM_CALLS, cache.STATE_CLASSIFIER_CALLS}
+    assert pool.closed is True
+
+
+def test_lifespan_pool_close_failure_does_not_break_shutdown(monkeypatch, no_http):
+    import ledger
+    _redis_ok(monkeypatch)
+
+    async def fake_pool(*a, **kw):
+        return FakePool(close_raises=True)
+
+    async def fake_seed(*a, **kw):
+        return False
+
+    monkeypatch.setattr(db, "create_db_pool", fake_pool)
+    monkeypatch.setattr(ledger, "seed_caps", fake_seed)
+    with TestClient(main.app):
+        pass
 
 
 def test_health_reports_caps_and_a_bool_for_the_key(monkeypatch, no_http):

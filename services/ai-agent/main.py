@@ -35,6 +35,8 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validato
 import cache
 import classifier
 import config
+import db
+import ledger
 import prompts
 from config import settings
 from providers.base import (
@@ -77,10 +79,23 @@ async def lifespan(app: FastAPI):
     config.STARTUP_TIMEOUT is read here at call time, never bound at import,
     so a test can move it without the module having copied the old value.
 
-    No database pool: 4.2 writes no ai.* table (spec decision 1). The pool
-    arrives with migration 005_ai.sql in Part 4.4.
+    Part 4.4 adds the database pool (ai.verdicts, the ai.llm_calls ledger,
+    users.settings), same bound, same fail-open rule: with no pool /analyze
+    answers 503 before spending anything, and the classifier still works,
+    its ledger rows counted as missed.
     """
     logger.info("Starting AI Agent...")
+
+    # Database (optional). Pool creation and its first query are bounded
+    # together, risk-shield's shape.
+    try:
+        app.state.db_pool = await asyncio.wait_for(
+            db.create_db_pool(), timeout=config.STARTUP_TIMEOUT
+        )
+        logger.info("✅ Database pool ready")
+    except Exception as e:
+        logger.warning(f"⚠️  Database unavailable (/analyze disabled, ledger off): {e!r}")
+        app.state.db_pool = None
 
     # Redis (optional). The factory and its PING are bounded together: a
     # Redis that accepts the socket and then never answers is as bad as one
@@ -102,6 +117,12 @@ async def lifespan(app: FastAPI):
         cache.STATE_CLASSIFIER_CALLS: cache.MemoryCap(),
     }
     app.state.memory_cost = cache.MemoryCost()
+
+    # Redis does not survive a `docker compose down`; the ledger does. Raise
+    # today's counters to what really went out, before anything is served.
+    app.state.caps_seeded = await ledger.seed_caps(
+        app.state.db_pool, app.state.redis, app.state.memory_caps, app.state.memory_cost
+    )
 
     # One httpx client for data-engine write-backs, reused across requests.
     import httpx
@@ -132,6 +153,11 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"Redis close failed: {e!r}")
     app.state.provider = None
+    if getattr(app.state, "db_pool", None) is not None:
+        try:
+            await asyncio.wait_for(app.state.db_pool.close(), timeout=config.STARTUP_TIMEOUT)
+        except Exception as e:
+            logger.warning(f"Database pool close failed: {e!r}")
 
 
 app = FastAPI(
@@ -164,7 +190,9 @@ async def health():
         "status": "ok",
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "version": "0.2.0",
+        "db_connected": getattr(app.state, "db_pool", None) is not None,
         "redis": getattr(app.state, "redis", None) is not None,
+        "capsSeeded": bool(getattr(app.state, "caps_seeded", False)),
         "llmConfigured": settings.llm_configured,
         "caps": {
             "llmDaily": settings.llm_daily_call_cap,
@@ -228,6 +256,7 @@ async def usage():
             "llmToday": numbers["llmCalls"],
             "classifierToday": numbers["classifierCalls"],
             "costMissingToday": numbers["costMissing"],
+            "ledgerMissedToday": numbers["ledgerMissed"],
         },
         "caps": {
             "llmDaily": settings.llm_daily_call_cap,
@@ -320,13 +349,23 @@ async def classify_headlines(body: ClassifyRequest):
     memory_cap = caps.get(cache.STATE_CLASSIFIER_CALLS) or cache.MemoryCap()
     memory_cost = getattr(app.state, "memory_cost", None) or cache.MemoryCost()
 
+    pool = getattr(app.state, "db_pool", None)
     try:
-        results, result = await classifier.classify(
-            provider, redis, memory_cap, memory_cost, headlines,
-            model=settings.llm_model_classifier,
-            cap=settings.llm_classifier_daily_call_cap,
-            known_event_keys=body.knownEventKeys,
-        )
+        try:
+            results, result = await classifier.classify(
+                provider, redis, memory_cap, memory_cost, headlines,
+                model=settings.llm_model_classifier,
+                cap=settings.llm_classifier_daily_call_cap,
+                known_event_keys=body.knownEventKeys,
+            )
+        except Exception as e:
+            # Part 4.4: a request that reached the wire gets its ledger row
+            # whatever it answered; then the error takes the mapping below.
+            await classifier.record_failure(
+                pool, redis, e, route=ledger.ROUTE_CLASSIFY,
+                model=settings.llm_model_classifier,
+            )
+            raise
     except (LLMCapExceeded, LLMCooledDown, LLMRateLimited) as e:
         logger.warning(f"/classify/headlines refused: {type(e).__name__}")
         raise HTTPException(status_code=429, detail=str(e)) from None
@@ -344,6 +383,9 @@ async def classify_headlines(body: ClassifyRequest):
         # Our own request is wrong — the classifier builds it, not the caller.
         logger.error(f"/classify/headlines: bad request built by this service ({e})")
         raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}") from None
+
+    if result is not None:
+        await classifier.record_success(pool, redis, result, route=ledger.ROUTE_CLASSIFY)
 
     written, errors = 0, 0
     if body.writeBack:
