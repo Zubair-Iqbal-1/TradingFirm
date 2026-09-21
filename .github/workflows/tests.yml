@@ -114,7 +114,8 @@ jobs:
             # asserts these overrides, so they must match compose. The three
             # locks that keep this suite off a live LLM: an empty key, a zero
             # daily cap, and an .invalid base URL (Part 4.1), plus a zero
-            # classifier cap and a dev-twin DATA_ENGINE_URL (Part 4.2).
+            # classifier cap and a dev-twin DATA_ENGINE_URL (Part 4.2), and a
+            # dev-twin RISK_SHIELD_URL with the verdict cache flag off (4.4).
             env: >-
               -e SERVICE_NAME=ai-agent-dev
               -e SERVICE_PORT=8004
@@ -123,6 +124,8 @@ jobs:
               -e LLM_BASE_URL=http://openrouter.invalid/api/v1
               -e LLM_CLASSIFIER_DAILY_CALL_CAP=0
               -e DATA_ENGINE_URL=http://data-engine-dev:8001
+              -e RISK_SHIELD_URL=http://risk-shield-dev:8003
+              -e LLM_VERDICT_CACHE=false
               -e DATABASE_URL=postgresql+asyncpg://ci:ci@postgres:5432/tradingfirm_dev
               -e REDIS_URL=redis://redis:6379/1
             tests: >-
@@ -137,6 +140,14 @@ jobs:
               tests/test_classify_endpoint.py
               tests/test_verdict_model.py
               tests/test_plan_math.py
+              tests/test_db.py
+              tests/test_ledger.py
+              tests/test_migration.py
+              tests/test_events.py
+              tests/test_clients.py
+              tests/test_verdict_prompt.py
+              tests/test_analyze.py
+              tests/test_analyze_cache.py
 
     steps:
       - uses: actions/checkout@v5
