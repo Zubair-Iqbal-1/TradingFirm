@@ -1024,3 +1024,15 @@ On all four pre-expiry nights the 00:15 reading sat at ES −0.85…−0.95 / NQ
 **Why:** the pin bought cache hits at the price of failing every call when one host is down. A preference gets the same hits on a normal day and a slower, dearer call on a bad one, and the ledger shows which it was.
 
 **Supersedes:** the entry above, "`LLM_PROVIDER_ORDER` pins OpenRouter's host, with no fallback" (same day, never pushed or deployed). No `.env` line is needed.
+
+---
+
+## 2026-09-21 — `LLM_VERDICT_CACHE=true` in prod, on a measured prefix
+
+**Decision:** prod's `.env` sets `LLM_VERDICT_CACHE=true`. The code default and the twin stay `false`.
+
+**Why:** the first live AAPL verdict wrote a 2,237-token prefix (`cacheWrite`), and a `fresh=true` call 49 s later read all of it back (`cacheRead`), both served by Anthropic under the default provider order: $0.018985 → $0.014231. The write premium is about $0.0011, so it pays whenever two analyses land inside 5 minutes and costs a tenth of a cent when they don't. An edit to `prompts/verdict.md` changes the prefix; re-check `cacheWrite` after one.
+
+**Also measured:** a 30-headline classifier batch is 6,349 in / 2,628 out = $0.039, above spec 4.4's $0.03 guess, because thirty 300-character summaries ride in the prompt. Reasoning tokens were 0 on all three calls at effort `low`.
+
+**Supersedes:** spec 4.4 decision 12's "off by default, not measured yet" for prod, and decision 14's classifier estimate.

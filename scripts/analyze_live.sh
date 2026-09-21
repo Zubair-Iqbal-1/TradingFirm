@@ -11,8 +11,10 @@
 #   ./scripts/analyze_live.sh AAPL 182.50     # with an entry
 #
 # Expected cost at OpenRouter's list price for anthropic/claude-sonnet-5
-# ($2 / $10 per 1M tokens, read from its model page 2026-09-21): about $0.07
-# for a ticker with a full batch of unlabelled headlines, ceiling ~$0.13.
+# ($2 / $10 per 1M tokens, read from its model page 2026-09-21), as measured
+# on the first live call: about $0.058 for a ticker with a full batch of 30
+# unlabelled headlines (classifier $0.039 + verdict $0.019), about $0.014 for
+# a repeat inside the prompt cache's 5 minutes. Ceiling ~$0.13.
 # The real figure is printed from OpenRouter's own usage.cost.
 #
 # Run only after a go in chat. Never from CI, never in a loop.
