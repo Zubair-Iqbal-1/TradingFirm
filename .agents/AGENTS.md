@@ -134,7 +134,8 @@
 → Runs only on the user's explicit go in chat, given for that specific action
 → Never inside a part's verification — verify on the dev twin, mocks or fixtures instead
 → The completion report lists what is ready and waiting for a go, one line per action
-→ Why: Parts 1.6–2.1 each recreated the prod container and applied migrations without asking. Harmless while prod holds no data; not once real scans are in it
+→ A prod deploy is `docker compose build <service>` then `up -d <service>`, in that order. `up -d` alone recreates the container from the existing image and deploys nothing; the twins mount source live and do not show this
+→ Why: Parts 1.6–2.1 each recreated the prod container and applied migrations without asking. Harmless while prod holds no data; not once real scans are in it. 4.2's waiting list said `up -d data-engine` alone, which would have redeployed the old image without the new route
 
 ---
 

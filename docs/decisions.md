@@ -888,3 +888,15 @@ On all four pre-expiry nights the 00:15 reading sat at ES −0.85…−0.95 / NQ
 **Also recorded:** the 09-21 04:15 ET night slot is one missed slot, with no action. yfinance returned no data for both contracts and the Finnhub news poll timed out in the same seconds, which points to a host network blip rather than a provider fault. The 04:45 slot recovered.
 
 **Supersedes:** nothing. 3.4c.1 was never specified in the repo; this entry is its only record.
+
+---
+
+## 2026-09-21 — A prod deploy is a build, and live scripts cannot run from the prod image (open for 4.8)
+
+**Decision:** every prod route or code change deploys as `docker compose build <service>` then `up -d <service>`. Prod images bake their code (`target: prod`, `COPY . .`), so `up -d` alone recreates the container from the existing image and deploys nothing. Spec 4.2's waiting list said `docker compose up -d data-engine`, and that was wrong: it would have redeployed the old image without `POST /news/{id}/sentiment`. The twins mount source live, so they never show this. G15 in `.agents/AGENTS.md` now carries the rule.
+
+**Open question for 4.8:** `services/ai-agent/.dockerignore` excludes `tests/`, so `tests/classify_live.py` is not in the prod image, and spec 4.2 decision 14's `docker exec tf-ai-agent python3 tests/classify_live.py` cannot work. 4.2's first live call runs the committed file's exact contents inside `tf-ai-agent` through `python3 -c` instead, with nothing written into the container. `tests/analyze_live.py` (plan row 4.8) hits the same wall, so **4.8's spec must settle where live scripts run**. `docker cp` into a prod container is ruled out, and so is shipping `tests/` in the prod image.
+
+**Why:** a deploy that silently changes nothing is worse than one that fails, because the report then describes code that isn't running.
+
+**Supersedes:** the `up -d data-engine` line in spec 4.2's "Waiting for a go" list, and the invocation in spec 4.2 decision 14.
