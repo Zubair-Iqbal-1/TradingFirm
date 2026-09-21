@@ -108,6 +108,24 @@ class Settings(BaseSettings):
     # is counted and logged, never raised at the caller.
     data_engine_timeout: float = 10.0
 
+    # Part 4.4 — /analyze.
+    # risk-shield, for the regime and the macro brief. Fail-open, so short.
+    # The dev twin hard-codes risk-shield-dev (test_twin_never_calls_prod_risk_shield).
+    risk_shield_url: str = "http://risk-shield:8003"
+    risk_shield_timeout: float = 5.0
+
+    # A cold dossier makes ~10 upstream calls and took 9.7 s in 2.5's live
+    # check; its slowest source is bounded at 8 s. Fail-closed.
+    dossier_timeout: float = 60.0
+
+    # The per-ticker verdict cache (D18). Flat: ai-agent has no exchange
+    # calendar. The input fingerprint, not the clock, does the real work.
+    verdict_cache_ttl: int = 14400
+
+    # cache_control on the verdict's system block. Off until a live call
+    # shows the prefix clears Sonnet 5's 1,024-token minimum (cacheWrite > 0).
+    llm_verdict_cache: bool = False
+
     # Debug mode
     debug: bool = False
 
