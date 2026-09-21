@@ -139,3 +139,29 @@ async def test_refresh_failed_fetch_does_not_start_cooldown():
     main.app.state.provider = FixtureProvider()
     result = await main.refresh_stock("AAPL")
     assert result["ticker"] == "AAPL"
+
+
+@pytest.mark.asyncio
+async def test_refresh_429s_distinguishable_for_ai_agent():
+    """Pinned for ai-agent's journal scorer (spec 4.5 decision 2), which
+    reads the two 429s differently: the cooldown carries Retry-After (the
+    ticker is requeued once, never treated as fresh), the provider's rate
+    limit does not (the scorer stops for the night). Drop Retry-After from
+    one, or add it to the other, and the scorer misreads a refusal."""
+    pool, _conn = _make_pool()
+    main.app.state.db_pool = pool
+    main.app.state.redis = FakeRedis()
+
+    await main.refresh_stock("NVDA")
+    with pytest.raises(HTTPException) as cooldown:
+        await main.refresh_stock("NVDA")
+    assert cooldown.value.status_code == 429
+    assert int(cooldown.value.headers["Retry-After"]) > 0
+
+    limited = MagicMock()
+    limited.download_daily = AsyncMock(side_effect=RuntimeError("429 Too Many Requests"))
+    main.app.state.provider = limited
+    with pytest.raises(HTTPException) as provider:
+        await main.refresh_stock("AMD")
+    assert provider.value.status_code == 429
+    assert not (provider.value.headers or {}).get("Retry-After")
