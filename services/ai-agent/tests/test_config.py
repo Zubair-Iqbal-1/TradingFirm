@@ -93,6 +93,26 @@ def test_twin_never_writes_prod_data_engine():
     assert "//data-engine:" not in s.data_engine_url
 
 
+def test_twin_never_calls_prod_risk_shield():
+    """The eighth lock (Part 4.4). /analyze reads the regime and the macro
+    brief over HTTP; without this the twin would read prod's rows. The
+    verdict's prompt-cache flag is pinned off beside it. Hard-coded in the
+    ai-agent-dev block; never drop them."""
+    s = Settings()
+    assert s.risk_shield_url == "http://risk-shield-dev:8003"
+    assert "//risk-shield:" not in s.risk_shield_url
+    assert s.llm_verdict_cache is False
+
+
+def test_analyze_defaults():
+    fields = Settings.model_fields
+    assert fields["risk_shield_url"].default == "http://risk-shield:8003"
+    assert fields["llm_verdict_cache"].default is False, "off until a live call measures the prefix"
+    assert fields["verdict_cache_ttl"].default == 14400
+    assert fields["dossier_timeout"].default == 60.0
+    assert fields["risk_shield_timeout"].default < fields["dossier_timeout"].default
+
+
 def test_classifier_cap_default_is_smaller_than_the_global_one():
     """Declared defaults, read from the model rather than from this env —
     the twin hard-codes both caps to 0. Spec 4.2 gate ii: ~400 unique
