@@ -68,6 +68,17 @@ def test_settings_or_prompt_change_invalidates(app, monkeypatch):
     assert post(client).json()["cached"] is False
 
 
+def test_projection_version_bump_invalidates(app, monkeypatch):
+    """Spec verdict-units decision 3: a cache entry written under an older
+    projection is a miss, whatever the prompt's sha says."""
+    import analyze
+    client, _, state = app()
+    post(client)
+    monkeypatch.setattr(analyze, "PROJECTION_VERSION", analyze.PROJECTION_VERSION + 1)
+    out = post(client).json()
+    assert out["cached"] is False and state.provider.count("verdict") == 2
+
+
 def test_low_relevance_headline_keeps_cache(app):
     client, world, state = app()
     post(client)

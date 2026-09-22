@@ -43,6 +43,41 @@ MAX_FILINGS = 10
 MAX_REACTIONS = 4
 MAX_RECOMMENDATIONS = 2
 
+# The shape of the document the model reads (spec verdict-units). Bump on
+# ANY change to the keys `project()` emits: it is in the cache fingerprint,
+# so a cached verdict built on an older document is never served, and it is
+# stored inside prompt_inputs as `projectionVersion` (absent = 1), so a
+# reader of ai.verdicts knows which key set a row follows.
+PROJECTION_VERSION = 2
+
+# The indicator keys the model reads, data-engine's name -> the projected
+# name. An allowlist, never a pass-through: a key data-engine adds later is
+# dropped until it is named here with its unit. The unit convention is the
+# suffix (`Atr` ATR14 multiples, `Pct` percent, `Frac` 0-1, `Usd` dollars,
+# `UsdM` millions of dollars); a bare number is a price level or one of the
+# conventional keys below. Pinned against data-engine's IndicatorsResponse
+# by test_indicator_keys_pinned_to_data_engine / data-engine's
+# test_indicator_fields_pinned_for_ai_agent. Change both or neither.
+INDICATOR_KEYS = {
+    "close": "close", "ema20": "ema20", "ema50": "ema50", "ema200": "ema200",
+    "atr14": "atr14Usd",
+    "rvol": "rvol", "rsi14": "rsi14",
+    "macd": "macd", "macdSignal": "macdSignal", "macdHist": "macdHist",
+    "pos52w": "pos52wFrac",
+    "ext20": "ext20Atr", "ext50": "ext50Atr",
+    "rsSpy5": "rsSpy5Pct", "rsSpy20": "rsSpy20Pct",
+    "rsSector5": "rsSector5Pct", "rsSector20": "rsSector20Pct",
+    "avgDollarVolume20": "avgDollarVolume20Usd",
+    "gapPct": "gapPct",
+    "sector": "sector", "zones": "zones", "benchmarks": "benchmarks",
+}
+UNIT_SUFFIXES = ("Atr", "Pct", "Frac", "Usd", "UsdM")
+# Numbers the model reads without a suffix: prices in dollars, and the
+# conventional keys the legend in prompts/verdict.md names one by one.
+PRICE_LEVEL_KEYS = frozenset({"close", "ema20", "ema50", "ema200", "low", "high", "price"})
+CONVENTIONAL_KEYS = frozenset({"rvol", "rsi14", "macd", "macdSignal", "macdHist",
+                               "score", "tests", "bars"})
+
 
 class VerdictRejected(Exception):
     """The model's answer breaks the verdict contract. Never repaired beyond
@@ -116,6 +151,22 @@ def _round(value: Any) -> Any:
     return value
 
 
+def pct_above(close: Any, ema: Any) -> Optional[float]:
+    """(close − ema) ÷ ema × 100 to 2 dp: the percent distance the model
+    reached for and computed wrong (spec verdict-units decision 2). None
+    unless both are finite numbers and the EMA is positive. A percent, never
+    a level: it is not in the fingerprint and not in the plan."""
+    try:
+        c, e = float(close), float(ema)
+    except (TypeError, ValueError):
+        return None
+    if isinstance(close, bool) or isinstance(ema, bool):
+        return None
+    if not (math.isfinite(c) and math.isfinite(e)) or e <= 0:
+        return None
+    return round((c - e) / e * 100, 2)
+
+
 def plan_view(plan: Union[PlanMath, PlanRejected]) -> tuple[Optional[dict], Optional[dict]]:
     """(plan, planRejection) as the model sees them. No size and no risk
     budget: the model has no use for the account, so it never sees it."""
@@ -146,9 +197,10 @@ def project(
     """The exact document the model reads, and what ai.verdicts.prompt_inputs
     stores (D5). Built from the dossier by selection, never by free text."""
     sections = dossier.get("sections", {})
-    indicators = dict(sections.get("indicators") or {})
-    for noisy in ("gaps20", "computedAt", "cached", "status", "reason", "detail", "bars"):
-        indicators.pop(noisy, None)
+    source = sections.get("indicators") or {}
+    indicators = {target: source.get(name) for name, target in INDICATOR_KEYS.items()}
+    indicators["aboveEma20Pct"] = pct_above(source.get("close"), source.get("ema20"))
+    indicators["aboveEma50Pct"] = pct_above(source.get("close"), source.get("ema50"))
 
     earnings = sections.get("earnings") or {}
     filings = sections.get("filings") or {}
@@ -166,6 +218,7 @@ def project(
         quality["newsClassifier"] = "unavailable"
 
     return _round({
+        "projectionVersion": PROJECTION_VERSION,
         "ticker": dossier.get("ticker"),
         "horizon": dossier.get("horizon"),
         "asOf": dossier.get("asOf"),
@@ -183,11 +236,16 @@ def project(
             {"form": f.get("form"), "filedOn": f.get("filedOn")}
             for f in (filings.get("rows") or [])[:MAX_FILINGS] if isinstance(f, dict)
         ],
-        "recommendations": (recs.get("items") or [])[:MAX_RECOMMENDATIONS],
+        "recommendations": [
+            {k: v for k, v in r.items() if k != "symbol"}
+            for r in (recs.get("items") or [])[:MAX_RECOMMENDATIONS] if isinstance(r, dict)
+        ],
         "profile": {
             "name": events_mod.sanitize_untrusted(profile.get("name"), 100) or None,
             "industry": events_mod.sanitize_untrusted(profile.get("industry"), 100) or None,
-            "marketCap": profile.get("marketCap"),
+            # Finnhub profile2 reports the cap in millions of USD; data-engine
+            # passes it through (dossier/assemble.py, pinned there for this key).
+            "marketCapUsdM": profile.get("marketCap"),
         },
         "macro": macro,
         "plan": plan_json,
@@ -280,8 +338,11 @@ def fingerprint(
     model: str,
 ) -> str:
     """The invalidation rule (spec 4.4 decision 9): a cached verdict is
-    served only while every one of these is unchanged."""
+    served only while every one of these is unchanged. `projection` (spec
+    verdict-units decision 3) retires every cache entry when the document's
+    key set changes, which prompt_sha alone cannot see."""
     basis = {
+        "projection": PROJECTION_VERSION,
         "events": sorted(high_event_keys),
         "earnings": next_earnings_date,
         "regime": regime,

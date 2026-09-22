@@ -15,7 +15,12 @@ One JSON document between two `<data-…>` tags, holding:
 
 - `indicators` — trend, momentum, volatility and relative-strength numbers
   computed from daily bars, and the support and resistance zones found in
-  them. `asOf` is the date of the last bar.
+  them. `asOf` is the date of the last bar. Units: a key ending `Atr` is a
+  multiple of ATR14 (`ext20Atr` 1.3 means 1.3 ATRs above the 20 EMA, not a
+  percent), `Pct` is percent, `Frac` is a 0–1 fraction, `Usd` is dollars,
+  `UsdM` is millions of dollars; `rsi14` and every `score` are 0–100, `rvol`
+  is a ratio, `macd*` are in dollars, and every other bare number is a
+  price in dollars.
 - `events` — recent news for the ticker, already grouped so that one story
   reported by several outlets is one line. `sources` is how many outlets
   carried it, `relevance` and `sentiment` (-1 to 1) come from a separate
@@ -34,6 +39,8 @@ One JSON document between two `<data-…>` tags, holding:
   multiples. Or `plan: null` with a `planRejection` saying why no plan could
   be built.
 - `dataQuality` — which sections were missing, stale, truncated or errored.
+  `truncated` means the section was cut at its cap (30 headlines, 10
+  filings), not that data is missing.
 
 ## Rules
 
