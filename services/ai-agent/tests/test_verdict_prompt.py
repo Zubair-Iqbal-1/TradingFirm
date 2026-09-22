@@ -17,11 +17,11 @@ from providers.base import validate_request
 
 TODAY = date(2026, 9, 21)
 ZONES = [{"low": 45.00, "high": 45.40}, {"low": 47.80, "high": 48.10},
-         {"low": 53.90, "high": 54.30}, {"low": 57.50, "high": 58.00}]
+         {"low": 53.90, "high": 54.30}, {"low": 56.90, "high": 57.30}]
 
 
 def plan_a():
-    """Spec 4.3's worked example A."""
+    """Spec 4.8a's worked example A: 53.90 is overhead (1.15R), T1 56.90 (2.03R)."""
     return compute_plan(entry=50.00, atr=1.20, zones=ZONES, account=25000, risk_pct=1.0)
 
 
@@ -96,7 +96,8 @@ def test_next_earnings_ignores_the_past_and_other_events():
 def test_projection_is_trimmed_rounded_and_carries_no_account():
     doc = inputs()
     ind = doc["indicators"]
-    assert doc["projectionVersion"] == analyze.PROJECTION_VERSION == 2
+    assert doc["projectionVersion"] == analyze.PROJECTION_VERSION == 3
+    assert doc["planMathVersion"] == 2
     assert ind["close"] == 50.0012 and ind["atr14Usd"] == 1.2 and "atr14" not in ind
     assert ind["ext20Atr"] == 0.751 and ind["pos52wFrac"] == 0.62 and ind["rsSpy5Pct"] == 1.23
     assert ind["avgDollarVolume20Usd"] == 1.5e9 and ind["aboveEma20Pct"] == 1.84
@@ -109,10 +110,27 @@ def test_projection_is_trimmed_rounded_and_carries_no_account():
     assert doc["profile"] == {"name": "Apple Inc", "industry": "Tech", "marketCapUsdM": 3100000.0}
     assert doc["dataQuality"] == {"news": "truncated", "filings": "unconfigured"}
     assert doc["plan"] == {"entry": 50.0, "stop": 46.6, "stopBasis": doc["plan"]["stopBasis"],
-                           "disasterLine": 45.4, "bestR": 2.21, "riskPerShare": 3.4,
-                           "targets": [{"price": 53.9, "r": 1.15}, {"price": 57.5, "r": 2.21}]}
+                           "disasterLine": 45.4, "bestR": 2.03, "riskPerShare": 3.4,
+                           "targets": [{"price": 56.9, "r": 2.03, "basis": "T1 56.90: resistance 56.90-57.30"}],
+                           "overhead": [{"price": 53.9, "r": 1.15, "basis": "overhead 53.90: resistance 53.90-54.30"}]}
     text = json.dumps(doc)
     assert "25000" not in text and "sizeShares" not in text and "riskBudget" not in text
+    assert "lossAtDisaster" not in text, "a percent of the account is still about the account"
+
+
+def test_plan_view_carries_overhead():
+    """Overhead reaches the model (text + the two numbers plan math fixed)
+    and the stored plan, never the LLM schema."""
+    view, rejection = analyze.plan_view(plan_a())
+    assert rejection is None
+    assert [o["price"] for o in view["overhead"]] == [53.9]
+    assert view["overhead"][0]["basis"].startswith("overhead 53.90:")
+    merged = analyze.merge(ANSWER, plan_a(), 38).model_dump(by_alias=True)["plan"]
+    assert [o["price"] for o in merged["overhead"]] == [53.9]
+    assert merged["targets"][0]["basis"] == "T1 56.90: resistance 56.90-57.30"
+    assert merged["lossAtDisasterPct"] == 1.34
+    for has_plan in (True, False):
+        assert "overhead" not in analyze.llm_schema(has_plan)["properties"]
 
 
 def test_projection_marks_an_unclassified_news_section():
@@ -230,7 +248,8 @@ def test_projection_version_is_pinned():
     the constant, then update both literals."""
     paths = _key_paths(inputs())
     digest = hashlib.sha256(json.dumps(paths).encode()).hexdigest()[:16]
-    assert (analyze.PROJECTION_VERSION, len(paths), digest) == (2, 56, "06175cbb4ac45601")
+    # 3: 4.8a added planMathVersion, plan.overhead and plan.*.basis (56 → 58 paths)
+    assert (analyze.PROJECTION_VERSION, len(paths), digest) == (3, 58, "b9ecad26d8cc780c")
 
 
 def test_projection_version_bump_changes_the_fingerprint(monkeypatch):
@@ -306,7 +325,8 @@ def test_injected_headline_cannot_change_levels():
     verdict = analyze.merge(obeyed, plan_a(), 38)
     plan = verdict.plan
     assert (plan.entry, plan.stop, plan.disaster_line, plan.size_shares) == (50.0, 46.6, 45.4, 73)
-    assert [(t.price, t.r) for t in plan.targets] == [(53.9, 1.15), (57.5, 2.21)]
+    assert [(t.price, t.r) for t in plan.targets] == [(56.9, 2.03)]
+    assert [(t.price, t.r) for t in plan.overhead] == [(53.9, 1.15)]
     assert plan.earnings_in_days == 38
 
 
@@ -317,7 +337,8 @@ def test_llm_schema_has_no_number_the_model_could_set():
         assert schema["additionalProperties"] is False
         assert schema["required"] == list(schema["properties"]), "strict: every field required"
         names = set(schema["properties"])
-        assert not names & {"entry", "stop", "disasterLine", "targets", "sizeShares", "plan", "price", "r"}
+        assert not names & {"entry", "stop", "disasterLine", "targets", "overhead", "basis",
+                            "lossAtDisasterPct", "sizeShares", "plan", "price", "r"}
         numeric = {k for k, v in schema["properties"].items() if v["type"] in ("number", "integer")}
         assert numeric <= {"confidence", "horizonDays"}
     assert analyze.llm_schema(True)["properties"]["verdict"]["enum"] == ["go", "wait", "avoid"]

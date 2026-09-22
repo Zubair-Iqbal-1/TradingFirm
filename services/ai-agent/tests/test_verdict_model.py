@@ -18,7 +18,9 @@ def plan_json(**over):
         "stopBasis": "support 47.80-48.10, low 47.80 - 1xATR 1.20",
         "disasterLine": 45.4,
         "invalidation": "daily close below the 20 EMA",
-        "targets": [{"price": 53.9, "r": 1.15}, {"price": 57.5, "r": 2.21}],
+        "targets": [{"price": 56.9, "r": 2.03, "basis": "T1 56.90: resistance 56.90-57.30"}],
+        "overhead": [{"price": 53.9, "r": 1.15, "basis": "overhead 53.90: resistance 53.90-54.30"}],
+        "lossAtDisasterPct": 1.34,
         "sizeShares": 73,
         "sizeBasis": "risk: 1% of 25000 = 250 / 3.40 per share",
         "earningsInDays": 12,
@@ -47,7 +49,8 @@ def test_valid_verdict_parses():
     v = Verdict.model_validate(verdict_json())
     assert v.verdict == "go"
     assert v.plan.stop == 46.6
-    assert v.plan.targets[1] == Target(price=57.5, r=2.21)
+    assert v.plan.targets[0] == Target(price=56.9, r=2.03, basis="T1 56.90: resistance 56.90-57.30")
+    assert v.plan.overhead[0].price == 53.9 and v.plan.loss_at_disaster_pct == 1.34
     assert v.thesis_breakers == ["Daily close below 47.80", "Guidance cut"]
 
 
@@ -174,7 +177,8 @@ def test_boundaries_accepted():
     Verdict.model_validate(verdict_json(confidence=0, riskFlags=[]))
     Verdict.model_validate(verdict_json(confidence=100, thesisBreakers=["b"] * 6, riskFlags=["f"] * 8))
     Plan.model_validate(plan_json(horizonDays=1, earningsInDays=0))
-    Plan.model_validate(plan_json(horizonDays=60, targets=[{"price": p, "r": 1.0} for p in (51, 52, 53)]))
+    Plan.model_validate(plan_json(horizonDays=60, overhead=[], targets=[{"price": p, "r": 1.0} for p in (51, 52, 53)]))
+    Plan.model_validate(plan_json(overhead=[{"price": p, "r": 0.5} for p in (51, 52, 53)], targets=[{"price": 56.9, "r": 2.03}]))
 
 
 def test_verdict_model_is_pure():
@@ -187,3 +191,29 @@ def test_verdict_model_is_pure():
         elif isinstance(node, ast.ImportFrom):
             roots.add((node.module or "").split(".")[0])
     assert roots == {"typing", "pydantic"}
+
+
+@pytest.mark.parametrize(
+    "over",
+    [
+        pytest.param({"overhead": [{"price": 50.0, "r": 0.1}]}, id="overhead_at_entry"),
+        pytest.param({"overhead": [{"price": 56.9, "r": 2.03}]}, id="overhead_at_t1"),
+        pytest.param({"overhead": [{"price": 57.0, "r": 2.1}]}, id="overhead_above_t1"),
+        pytest.param({"overhead": [{"price": 52.0, "r": 0.6}, {"price": 51.0, "r": 0.3}]}, id="overhead_descending"),
+        pytest.param({"overhead": [{"price": p, "r": 0.5} for p in (51, 52, 53, 54)]}, id="four_overhead"),
+        pytest.param({"lossAtDisasterPct": -0.1}, id="negative_loss"),
+        pytest.param({"targets": [{"price": 56.9, "r": 2.03, "basis": ""}]}, id="blank_basis"),
+    ],
+)
+def test_plan_overhead_bounds(over):
+    with pytest.raises(ValidationError):
+        Plan.model_validate(plan_json(**over))
+
+
+def test_plan_before_4_8a_still_parses():
+    """Rows stored by v1 plan math have no overhead, basis or loss field."""
+    body = plan_json()
+    del body["overhead"], body["lossAtDisasterPct"]
+    body["targets"] = [{"price": 53.9, "r": 1.15}, {"price": 57.5, "r": 2.21}]
+    p = Plan.model_validate(body)
+    assert p.overhead == [] and p.loss_at_disaster_pct is None and p.targets[0].basis is None

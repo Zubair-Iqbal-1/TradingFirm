@@ -74,7 +74,7 @@ async def test_verdict_and_ledger_row_share_one_transaction():
     assert pool.tx_open == 1
     assert [c[1] for c in pool.calls] == [db.INSERT_VERDICT_SQL, db.INSERT_LLM_CALL_SQL]
     v_args = dict(zip(db.VERDICT_COLUMNS, pool.calls[0][2]))
-    assert db.INSERT_VERDICT_SQL.count("$") == len(db.VERDICT_COLUMNS) == 23
+    assert db.INSERT_VERDICT_SQL.count("$") == len(db.VERDICT_COLUMNS) == 24
     assert json.loads(v_args["dossier"]) == {"ticker": "AAPL"}
     assert json.loads(v_args["thesis"]) == ["a", "b", "c"]
     assert v_args["plan_proposed"] is None and v_args["entry"] == Decimal("50.00")
@@ -183,3 +183,19 @@ async def test_store_failure_rolls_back_every_row_of_the_ticker():
     with pytest.raises(asyncpg.PostgresError):
         await db.insert_outcomes(pool, [_outcome(1), _outcome(5)])
     assert pool.calls == []
+
+
+@pytest.mark.asyncio
+async def test_insert_verdict_writes_plan_math_version():
+    """4.8a: the version rides in the same INSERT as the row (last column);
+    a record without it (a hand backfill of an old payload) writes NULL = 1."""
+    pool = FakePool({"INSERT INTO ai.verdicts": {"id": "11111111-1111-4111-8111-111111111111"}})
+    await db.insert_verdict_with_call(pool, {**VERDICT, "plan_math_version": 2}, CALL)
+    v_args = dict(zip(db.VERDICT_COLUMNS, pool.calls[0][2]))
+    assert v_args["plan_math_version"] == 2 and db.VERDICT_COLUMNS[-1] == "plan_math_version"
+    assert "plan_math_version" in db.INSERT_VERDICT_SQL and "$24" in db.INSERT_VERDICT_SQL
+    pool = FakePool({"INSERT INTO ai.verdicts": {"id": "11111111-1111-4111-8111-111111111111"}})
+    await db.insert_verdict_with_call(pool, VERDICT, CALL)
+    assert dict(zip(db.VERDICT_COLUMNS, pool.calls[0][2]))["plan_math_version"] is None
+    assert "COALESCE(v.plan_math_version, 1) AS plan_math_version" in db.JOURNAL_ROWS_SQL
+    assert "atr14Usd" in db.JOURNAL_ROWS_SQL and "'atr14'" in db.JOURNAL_ROWS_SQL

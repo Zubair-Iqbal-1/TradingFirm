@@ -26,7 +26,7 @@ from tests.test_cache import FakeRedis
 MODEL = "anthropic/claude-sonnet-5"
 VERDICT_ID = "11111111-1111-4111-8111-111111111111"
 ZONES = [{"low": 45.00, "high": 45.40}, {"low": 47.80, "high": 48.10},
-         {"low": 53.90, "high": 54.30}, {"low": 57.50, "high": 58.00}]
+         {"low": 53.90, "high": 54.30}, {"low": 56.90, "high": 57.30}]
 LABEL = {"relevance": "high", "sentiment": -0.4, "category": "guidance", "oneLine": "Guidance cut.",
          "eventKey": "aapl-guidance-cut", "model": MODEL, "classifiedAt": "2026-09-20T18:00:00+00:00"}
 
@@ -40,7 +40,9 @@ def news_item(i, label=None, with_id=True):
 def dossier(news=(), close=50.0, atr=1.2, zones=ZONES, as_of="2026-09-18T00:00:00Z",
             earnings="2026-10-29T00:00:00Z", status="ok"):
     return {"ticker": "AAPL", "horizon": "swing", "asOf": as_of, "cached": False, "sections": {
-        "indicators": {"status": status, "close": close, "atr14": atr, "ema20": 49.0,
+        # ema20 47.5 → an EMA20 stop of 46.30, under the zone stop 46.60, so the
+        # far-support rule keeps the zone stop and example A's numbers hold
+        "indicators": {"status": status, "close": close, "atr14": atr, "ema20": 47.5,
                        "zones": {"support": list(zones[:2]), "resistance": list(zones[2:])}},
         "news": {"status": "ok", "items": list(news)},
         "events": {"status": "ok", "items": [{"type": "earnings", "at": earnings, "meta": {}}]},
@@ -199,7 +201,9 @@ def test_analyze_returns_stores_and_ledgers_a_verdict(app):
     assert (out["entry"], out["entrySource"]) == (50.0, "last_close")
     plan = out["verdict"]["plan"]
     assert (plan["stop"], plan["disasterLine"], plan["sizeShares"]) == (46.6, 45.4, 73)
-    assert plan["targets"] == [{"price": 53.9, "r": 1.15}, {"price": 57.5, "r": 2.21}]
+    assert plan["targets"] == [{"price": 56.9, "r": 2.03, "basis": "T1 56.90: resistance 56.90-57.30"}]
+    assert plan["overhead"] == [{"price": 53.9, "r": 1.15, "basis": "overhead 53.90: resistance 53.90-54.30"}]
+    assert plan["lossAtDisasterPct"] == 1.34
     assert plan["earningsInDays"] is not None and plan["invalidation"] == GO["invalidation"]
     assert out["regime"] == "CAUTIOUS" and out["macroStatus"] == "ok" and out["planRejection"] is None
 
@@ -207,6 +211,8 @@ def test_analyze_returns_stores_and_ledgers_a_verdict(app):
     assert row["entry"] == Decimal("50.00") and row["entry_source"] == "last_close"
     assert json.loads(row["dossier"])["ticker"] == "AAPL", "the full dossier snapshot"
     assert json.loads(row["prompt_inputs"])["plan"]["stop"] == 46.6
+    assert json.loads(row["prompt_inputs"])["planMathVersion"] == 2 == row["plan_math_version"]
+    assert json.loads(row["plan_proposed"])["overhead"][0]["price"] == 53.9
     assert row["macro_brief_id"] is None and row["regime"] == "CAUTIOUS"
     assert state.db_pool.tx_open == 1
 
@@ -475,3 +481,29 @@ def test_a_request_this_service_built_wrong_is_500(app):
     resp = post(client)
     assert resp.status_code == 500 and state.db_pool.ledger() == []
     assert not any("lock:" in k for k in state.redis.store)
+
+
+def test_analyze_passes_swing_low_and_ema20_when_present(app, monkeypatch):
+    """The dossier's ema20 reaches plan math, and so does `lastSwingLow`
+    once data-engine sends it (4.8a-de); until then both swing kwargs are
+    None and plan math needs no edit when the field arrives."""
+    import analyst
+    seen = []
+    real = analyst.compute_plan
+
+    def spy(**kw):
+        seen.append(kw)
+        return real(**kw)
+
+    monkeypatch.setattr(analyst, "compute_plan", spy)
+    client, world, _ = app()
+    assert post(client).status_code == 200
+    assert seen[-1]["ema20"] == 47.5 and seen[-1]["swing_low"] is None and seen[-1]["swing_low_date"] is None
+    world.dossier = dossier()
+    world.dossier["sections"]["indicators"]["lastSwingLow"] = {"price": 48.5, "date": "2026-09-15"}
+    assert post(client, fresh="true").status_code == 200
+    assert (seen[-1]["swing_low"], seen[-1]["swing_low_date"]) == (48.5, "2026-09-15")
+    # a malformed field is ignored, not a 502
+    world.dossier["sections"]["indicators"]["lastSwingLow"] = "48.5"
+    assert post(client, fresh="true").status_code == 200
+    assert seen[-1]["swing_low"] is None

@@ -27,7 +27,7 @@ from typing import Any, Optional, Union
 from pydantic import ValidationError
 
 import events as events_mod
-from grading.plan_math import PlanMath, PlanRejected
+from grading.plan_math import PLAN_MATH_VERSION, PlanMath, PlanRejected
 from models import verdict as verdict_model
 from models.verdict import Plan, Verdict
 
@@ -48,7 +48,7 @@ MAX_RECOMMENDATIONS = 2
 # so a cached verdict built on an older document is never served, and it is
 # stored inside prompt_inputs as `projectionVersion` (absent = 1), so a
 # reader of ai.verdicts knows which key set a row follows.
-PROJECTION_VERSION = 2
+PROJECTION_VERSION = 3
 
 # The indicator keys the model reads, data-engine's name -> the projected
 # name. An allowlist, never a pass-through: a key data-engine adds later is
@@ -177,7 +177,8 @@ def plan_view(plan: Union[PlanMath, PlanRejected]) -> tuple[Optional[dict], Opti
         "stop": plan.stop,
         "stopBasis": plan.stop_basis,
         "disasterLine": plan.disaster_line,
-        "targets": [{"price": t.price, "r": t.r} for t in plan.targets],
+        "targets": [{"price": t.price, "r": t.r, "basis": t.basis} for t in plan.targets],
+        "overhead": [{"price": t.price, "r": t.r, "basis": t.basis} for t in plan.overhead],
         "bestR": plan.best_r,
         "riskPerShare": plan.risk_per_share,
     }, None
@@ -219,6 +220,7 @@ def project(
 
     return _round({
         "projectionVersion": PROJECTION_VERSION,
+        "planMathVersion": PLAN_MATH_VERSION,
         "ticker": dossier.get("ticker"),
         "horizon": dossier.get("horizon"),
         "asOf": dossier.get("asOf"),
@@ -343,6 +345,7 @@ def fingerprint(
     key set changes, which prompt_sha alone cannot see."""
     basis = {
         "projection": PROJECTION_VERSION,
+        "planMath": PLAN_MATH_VERSION,
         "events": sorted(high_event_keys),
         "earnings": next_earnings_date,
         "regime": regime,
@@ -409,9 +412,11 @@ def merge(answer: dict, plan: Union[PlanMath, PlanRejected], earnings_in_days: O
             "stopBasis": plan.stop_basis,
             "disasterLine": plan.disaster_line,
             "invalidation": _text(answer.get("invalidation"), verdict_model.BULLET_MAX, "invalidation"),
-            "targets": [{"price": t.price, "r": t.r} for t in plan.targets],
+            "targets": [{"price": t.price, "r": t.r, "basis": t.basis} for t in plan.targets],
+            "overhead": [{"price": t.price, "r": t.r, "basis": t.basis} for t in plan.overhead],
             "sizeShares": plan.size_shares,
             "sizeBasis": plan.size_basis,
+            "lossAtDisasterPct": plan.loss_at_disaster_pct,
             "earningsInDays": earnings_in_days,
             "holdThroughEarnings": answer.get("holdThroughEarnings"),
             "horizonDays": answer.get("horizonDays"),

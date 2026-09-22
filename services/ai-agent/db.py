@@ -135,7 +135,7 @@ VERDICT_COLUMNS = (
     "dossier", "prompt_inputs", "prompt_sha", "fingerprint", "macro_brief_id",
     "regime", "verdict", "confidence", "reasoning", "thesis", "thesis_breakers",
     "risk_flags", "plan_proposed", "plan_rejection", "model", "tokens_in",
-    "tokens_out",
+    "tokens_out", "plan_math_version",
 )
 _JSON_COLUMNS = frozenset({
     "dossier", "prompt_inputs", "thesis", "thesis_breakers", "risk_flags",
@@ -147,11 +147,13 @@ INSERT INTO ai.verdicts
     (user_id, ticker, horizon, asked_at, entry, entry_source,
      dossier, prompt_inputs, prompt_sha, fingerprint, macro_brief_id,
      regime, verdict, confidence, reasoning, thesis, thesis_breakers,
-     risk_flags, plan_proposed, plan_rejection, model, tokens_in, tokens_out)
+     risk_flags, plan_proposed, plan_rejection, model, tokens_in, tokens_out,
+     plan_math_version)
 VALUES ($1::uuid, $2, $3, $4, $5, $6,
         $7::jsonb, $8::jsonb, $9, $10, $11::uuid,
         $12, $13, $14, $15, $16::jsonb, $17::jsonb,
-        $18::jsonb, $19::jsonb, $20::jsonb, $21, $22, $23)
+        $18::jsonb, $19::jsonb, $20::jsonb, $21, $22, $23,
+        $24)
 RETURNING id
 """
 
@@ -298,9 +300,16 @@ async def insert_outcomes(pool: asyncpg.Pool, rows: list[dict]) -> int:
 
 # One row per verdict × outcome (or one per verdict with none), for
 # GET /journal/stats. Read-only.
+# plan_math_version NULL = 1 (rows before 4.8a). The stop and the ATR the
+# row was built on give the risk-in-ATR bucket (4.8a-9); v1 rows stored the
+# ATR as `atr14`, v2 rows (projection 2+) as `atr14Usd`.
 JOURNAL_ROWS_SQL = """
 SELECT v.id, v.model, v.verdict, v.confidence, v.asked_at,
        (v.plan_proposed IS NOT NULL) AS has_plan,
+       COALESCE(v.plan_math_version, 1) AS plan_math_version,
+       v.entry, v.plan_proposed->>'stop' AS plan_stop,
+       COALESCE(v.prompt_inputs->'indicators'->>'atr14Usd',
+                v.prompt_inputs->'indicators'->>'atr14') AS atr14,
        o.horizon_days, o.return_pct, o.stop_hit, o.target_hit, o.first_hit,
        o.r_multiple, o.session_date
 FROM ai.verdicts v

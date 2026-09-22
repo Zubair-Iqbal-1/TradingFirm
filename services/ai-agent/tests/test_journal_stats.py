@@ -20,9 +20,14 @@ SONNET, GLM = "anthropic/claude-sonnet-5", "z-ai/glm-5"
 
 
 def row(n, verdict="go", h=1, ret="1.000", model=SONNET, confidence=70, plan=True,
-        stop=None, target=None, first=None, r=None, asked=ASKED):
+        stop=None, target=None, first=None, r=None, asked=ASKED, version=2,
+        entry="50.00", plan_stop="46.60", atr="1.2"):
+    """One JOURNAL_ROWS_SQL row. Defaults: plan math v2, risk 3.40 = 2.83 ATR
+    (bucket >2); jsonb ->> text arrives as strings, like the real query."""
     return {"id": f"{n:08d}-0000-4000-8000-000000000000", "model": model, "verdict": verdict,
             "confidence": confidence, "asked_at": asked, "has_plan": plan,
+            "plan_math_version": version, "entry": Decimal(entry),
+            "plan_stop": plan_stop if plan else None, "atr14": atr,
             "horizon_days": h, "return_pct": None if ret is None else Decimal(ret),
             "stop_hit": stop, "target_hit": target, "first_hit": first,
             "r_multiple": None if r is None else Decimal(r),
@@ -35,9 +40,13 @@ def unscored(n, **kw):
     return out
 
 
-def group(answer, verdict, h, model=SONNET):
-    [m] = [x for x in answer["models"] if x["model"] == model]
-    return m["byVerdict"][verdict][str(h)]
+def entry(answer, model=SONNET, version=2):
+    [m] = [x for x in answer["models"] if x["model"] == model and x["planMathVersion"] == version]
+    return m
+
+
+def group(answer, verdict, h, model=SONNET, version=2):
+    return entry(answer, model, version)["byVerdict"][verdict][str(h)]
 
 
 # ── The numbers ──────────────────────────────────────────────────
@@ -91,13 +100,13 @@ def test_stats_never_mix_models():
             row(2, ret="-2.000", model=GLM, confidence=80),
             row(3, ret="4.000", model=SONNET, confidence=85)]
     got = stats.compute(rows, NOW, 90)
-    assert [m["model"] for m in got["models"]] == [SONNET, GLM], "one entry each, sorted"
+    assert [(m["model"], m["planMathVersion"]) for m in got["models"]] == [(SONNET, 2), (GLM, 2)], "one entry each, sorted"
     assert group(got, "go", 1, SONNET)["hitRate"] == 1.0
     assert group(got, "go", 1, GLM)["hitRate"] == 0.0
     assert group(got, "go", 1, SONNET)["meanReturnPct"] == 3.0
     assert group(got, "go", 1, GLM)["asked"] == 1
-    sonnet_cal = next(m for m in got["models"] if m["model"] == SONNET)["calibration"]["1"]
-    glm_cal = next(m for m in got["models"] if m["model"] == GLM)["calibration"]["1"]
+    sonnet_cal = entry(got, SONNET)["calibration"]["1"]
+    glm_cal = entry(got, GLM)["calibration"]["1"]
     assert [b["n"] for b in sonnet_cal if b["bucket"] == "80-89"] == [2]
     assert [b["n"] for b in glm_cal if b["bucket"] == "80-89"] == [1]
 
@@ -120,6 +129,61 @@ def test_scored_through_and_fold():
     got = stats.compute(rows, NOW, 30)
     assert got["scoredThrough"] == "2026-09-28" and got["days"] == 30
     assert group(got, "go", 1)["asked"] == 1 == group(got, "go", 5)["asked"]
+
+
+def test_stats_never_mix_plan_math_versions():
+    """Same model, two plan-math eras: two entries, each rate its own, and
+    the v1 stop rate (a wide zone stop) never lifts or sinks v2's."""
+    rows = [row(1, ret="2.000", version=1, stop=True), row(2, ret="-1.000", version=1, stop=True),
+            row(3, ret="3.000", version=2, stop=False)]
+    got = stats.compute(rows, NOW, 90)
+    assert [(m["model"], m["planMathVersion"]) for m in got["models"]] == [(SONNET, 1), (SONNET, 2)]
+    assert group(got, "go", 1, version=1)["hitRate"] == 0.5 and group(got, "go", 1, version=1)["stopHitRate"] == 1.0
+    assert group(got, "go", 1, version=2)["hitRate"] == 1.0 and group(got, "go", 1, version=2)["stopHitRate"] == 0.0
+    assert group(got, "go", 1, version=2)["asked"] == 1
+
+
+def test_stats_null_version_is_one():
+    """A row from before 4.8a (the SQL COALESCEs NULL to 1; fold guards a
+    missing key too) lands in the version-1 entry."""
+    rows = [row(1, version=None), row(2)]
+    del rows[0]["plan_math_version"]
+    rows.append({**row(3), "plan_math_version": None})
+    got = stats.compute(rows, NOW, 90)
+    assert [m["planMathVersion"] for m in got["models"]] == [1, 2]
+    assert group(got, "go", 1, version=1)["asked"] == 2 and group(got, "go", 1, version=2)["asked"] == 1
+
+
+def test_stats_by_risk_bucket():
+    """stop_hit rate by risk-in-ATR bucket per horizon: <1.5 / 1.5-2 / >2,
+    boundaries 1.5 in the middle bucket, 2 in the middle bucket. A plan-less
+    row and an unscored horizon count in no bucket; a row with no usable ATR
+    has no bucket."""
+    rows = [
+        row(1, stop=True, plan_stop="48.50", atr="1.2"),    # 1.50 / 1.2 = 1.25  → <1.5
+        row(2, stop=False, plan_stop="48.20", atr="1.2"),   # 1.80 / 1.2 = 1.50  → 1.5-2
+        row(3, stop=True, plan_stop="47.60", atr="1.2"),    # 2.40 / 1.2 = 2.00  → 1.5-2
+        row(4, stop=True, plan_stop="46.60", atr="1.2"),    # 3.40 / 1.2 = 2.83  → >2
+        row(5, stop=False, plan_stop="46.60", atr="1.2"),   # >2
+        row(6, stop=False, plan_stop="46.60", atr="1.2", h=5),   # scored at +5 only
+        row(7, plan=False),                                 # no plan: no bucket
+        row(8, stop=True, plan_stop="46.60", atr=None),     # no ATR: no bucket
+        row(9, stop=True, plan_stop="46.60", atr="0"),      # zero ATR: no bucket
+    ]
+    got = stats.compute(rows, NOW, 90)
+    by = entry(got)["stopHitByRiskAtr"]
+    assert set(by) == {str(h) for h in stats.HORIZONS}
+    assert by["1"] == {"<1.5": {"n": 1, "stopHitRate": 1.0},
+                       "1.5-2": {"n": 2, "stopHitRate": 0.5},
+                       ">2": {"n": 2, "stopHitRate": 0.5}}
+    assert by["5"] == {"<1.5": {"n": 0, "stopHitRate": None},
+                       "1.5-2": {"n": 0, "stopHitRate": None},
+                       ">2": {"n": 1, "stopHitRate": 0.0}}
+    assert stats.risk_bucket(stats.risk_atr("50", "46.60", "1.2")) == ">2"
+    assert stats.risk_bucket(stats.risk_atr(50, 50, 1.2)) is None, "zero risk: no bucket"
+    assert stats.risk_bucket(None) is None
+    # rows before the units fix stored the ATR as atr14: the SQL COALESCEs both names
+    assert "atr14Usd" in db.JOURNAL_ROWS_SQL and "->>'atr14'" in db.JOURNAL_ROWS_SQL
 
 
 # ── The route ────────────────────────────────────────────────────

@@ -36,8 +36,11 @@ One JSON document between two `<data-…>` tags, holding:
   view could not be read: say so in `riskFlags` and lean cautious.
 - `plan` — the trade plan computed by deterministic code from the entry, the
   ATR and the zones: entry, stop, disaster line, targets with their R
-  multiples. Or `plan: null` with a `planRejection` saying why no plan could
-  be built.
+  multiples, and `overhead`: resistance between the entry and the first
+  target that pays under 1.5R, or sits in a zone the entry is inside — it
+  must be cleared before the first target, and it is not a target. Every
+  level carries a `basis` naming the zone or rule it came from. Or
+  `plan: null` with a `planRejection` saying why no plan could be built.
 - `dataQuality` — which sections were missing, stale, truncated or errored.
   `truncated` means the section was cut at its cap (30 headlines, 10
   filings), not that data is missing.

@@ -26,7 +26,7 @@ import events as events_mod
 import ledger
 import prompts
 import upstream
-from grading.plan_math import PlanMath, compute_plan
+from grading.plan_math import PLAN_MATH_VERSION, PlanMath, compute_plan
 from providers.base import (
     LLMCapExceeded,
     LLMCooledDown,
@@ -177,11 +177,16 @@ async def run(state, settings, ticker: str, horizon: str, entry: Optional[float]
     indicators = sections["indicators"]
     zones = indicators.get("zones") or {}
     resolved, entry_source = analyze.resolve_entry(indicators, given)
+    # `lastSwingLow` is not in the dossier yet (4.8a-de adds it); the
+    # pass-through means plan math needs no edit when it arrives.
+    swing = indicators.get("lastSwingLow")
+    swing = swing if isinstance(swing, dict) else {}
     try:
         plan = compute_plan(
             entry=float(resolved), atr=indicators.get("atr14"),
             zones=list(zones.get("support") or []) + list(zones.get("resistance") or []),
             account=float(account["accountSize"]), risk_pct=float(account["riskPct"]),
+            ema20=indicators.get("ema20"), swing_low=swing.get("price"), swing_low_date=swing.get("date"),
         )
     except ValueError as e:
         raise AnalyzeError(502, f"dossier breaks the plan-math contract: {e}") from None
@@ -282,6 +287,7 @@ async def run(state, settings, ticker: str, horizon: str, entry: Optional[float]
             "risk_flags": body["riskFlags"], "plan_proposed": body["plan"],
             "plan_rejection": rejection, "model": result.model,
             "tokens_in": result.usage.get("input"), "tokens_out": result.usage.get("output"),
+            "plan_math_version": PLAN_MATH_VERSION,
         }
 
         # 13. store: the verdict and its ledger row, or neither ───

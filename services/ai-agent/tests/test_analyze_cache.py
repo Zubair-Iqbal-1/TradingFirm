@@ -202,3 +202,15 @@ def test_cached_verdict_read_failure_is_a_miss(app):
     state.db_pool.raise_on = "FROM ai.verdicts"
     out = post(client).json()
     assert out["cached"] is False and state.provider.count("verdict") == 2
+
+
+def test_plan_math_version_in_fingerprint(app, monkeypatch):
+    """A verdict cached under plan math v1 is never served after the v2
+    deploy: the version is in the fingerprint (4.8a decision 4)."""
+    import analyze
+    client, _, state = app()
+    assert post(client).json()["cached"] is False
+    assert post(client).json()["cached"] is True
+    monkeypatch.setattr(analyze, "PLAN_MATH_VERSION", analyze.PLAN_MATH_VERSION + 1)
+    out = post(client).json()
+    assert out["cached"] is False and len(state.provider.calls) == 2

@@ -45,6 +45,9 @@ class Target(BaseModel):
 
     price: float = Field(gt=0)
     r: float = Field(gt=0)
+    # 4.8a: which zone the level came from, in plain words. Optional so rows
+    # stored before 4.8a still parse (the journal reads them).
+    basis: Optional[Basis] = None
 
 
 class Plan(BaseModel):
@@ -56,18 +59,25 @@ class Plan(BaseModel):
     disaster_line: float = Field(gt=0, alias="disasterLine")
     invalidation: Bullet
     targets: list[Target] = Field(min_length=1, max_length=TARGETS_MAX)
+    # 4.8a: resistance between the entry and T1 that pays under 1.5R (or sits
+    # in a zone straddling the entry). Empty on rows stored before 4.8a.
+    overhead: list[Target] = Field(default_factory=list, max_length=TARGETS_MAX)
     size_shares: int = Field(ge=1, alias="sizeShares")
     size_basis: Basis = Field(alias="sizeBasis")
+    # 4.8a: size × (entry − disaster) ÷ account, capped at 2.5 % by plan math.
+    loss_at_disaster_pct: Optional[float] = Field(default=None, ge=0, alias="lossAtDisasterPct")
     earnings_in_days: Optional[int] = Field(default=None, ge=0, alias="earningsInDays")
     hold_through_earnings: bool = Field(default=False, alias="holdThroughEarnings")
     horizon_days: int = Field(ge=1, le=HORIZON_DAYS_MAX, alias="horizonDays")
 
     @model_validator(mode="after")
     def _levels_ascend(self) -> "Plan":
-        """0 < disaster < stop < entry < t1 < t2 < t3, strictly (D8, D11)."""
-        levels = [self.disaster_line, self.stop, self.entry] + [t.price for t in self.targets]
+        """0 < disaster < stop < entry < overhead… < t1 < t2 < t3, strictly
+        (D8, D11, 4.8a-3)."""
+        levels = ([self.disaster_line, self.stop, self.entry] + [t.price for t in self.overhead]
+                  + [t.price for t in self.targets])
         if any(lo >= hi for lo, hi in zip(levels, levels[1:])):
-            raise ValueError("levels must ascend: disasterLine < stop < entry < targets")
+            raise ValueError("levels must ascend: disasterLine < stop < entry < overhead < targets")
         return self
 
 

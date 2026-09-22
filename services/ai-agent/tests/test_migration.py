@@ -51,9 +51,11 @@ def test_migration_007_never_carries_an_account_size(sql):
 
 
 def test_migration_007_matches_the_columns_db_py_writes(sql):
+    # plan_math_version arrives in 009 (test_migrations_hold_every_verdict_column_db_py_writes)
+    later = {"plan_math_version"}
     for table, columns in (("ai.verdicts", db.VERDICT_COLUMNS), ("ai.llm_calls", db.LLM_CALL_COLUMNS)):
         body = re.search(rf"CREATE TABLE IF NOT EXISTS {re.escape(table)} \((.*?)\n\);", sql, re.S).group(1)
-        for column in columns:
+        for column in (c for c in columns if c not in later):
             assert re.search(rf"^\s+{column}\s+\S", body, re.M), f"{table}.{column}"
     verdicts = re.search(r"ai\.verdicts \((.*?)\n\);", sql, re.S).group(1)
     assert "served_count    INTEGER NOT NULL DEFAULT 0" in verdicts
@@ -129,3 +131,30 @@ def test_migrations_hold_every_outcome_column_db_py_writes(sql, sql008):
     for column in db.OUTCOME_COLUMNS:
         assert re.search(rf"^\s+{column}\s+\S", body, re.M) or \
             re.search(rf"ADD COLUMN IF NOT EXISTS {column} ", sql008), column
+
+
+@pytest.fixture(scope="module")
+def sql009():
+    text = _raw("009_plan_math_version.sql").decode("utf-8")
+    return "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("--"))
+
+
+def test_migration_009_is_rerunnable(sql009):
+    statements = [s.strip() for s in sql009.split(";") if s.strip()]
+    assert len(statements) == 1
+    assert statements[0].startswith("ALTER TABLE ai.verdicts ADD COLUMN IF NOT EXISTS plan_math_version SMALLINT")
+    assert "NOT NULL" not in statements[0], "nullable: rows before 4.8a read as version 1"
+    assert not re.search(r"\b(DROP|TRUNCATE|DELETE|UPDATE|INSERT|CREATE)\b", sql009), "no backfill"
+
+
+def test_migration_009_adds_plan_math_version(sql009):
+    from grading import plan_math
+    assert re.search(r"plan_math_version SMALLINT\s+CHECK \(plan_math_version >= 1\);", sql009)
+    assert plan_math.PLAN_MATH_VERSION >= 1
+
+
+def test_migrations_hold_every_verdict_column_db_py_writes(sql, sql009):
+    body = re.search(r"ai\.verdicts \((.*?)\n\);", sql, re.S).group(1)
+    for column in db.VERDICT_COLUMNS:
+        assert re.search(rf"^\s+{column}\s+\S", body, re.M) or \
+            re.search(rf"ADD COLUMN IF NOT EXISTS {column} ", sql009), column
