@@ -168,3 +168,21 @@ A change takes effect on the next analyze: account size and risk % are part of t
 ### A verdict that was paid for but not stored
 
 If Postgres fails after the model answered, `/analyze` still returns the verdict with `stored: false`, and `tf-ai-agent` logs one ERROR line starting `VERDICT NOT STORED`, followed by a JSON payload `{"verdict": {...}, "llmCall": {...}}`. Its keys are the columns of `ai.verdicts` and `ai.llm_calls`. To backfill (D5: every verdict is stored): insert the `verdict` object into `ai.verdicts`, take the returned `id`, and insert `llmCall` into `ai.llm_calls` with that `verdict_id`. `GET /usage` shows `ledgerMissedToday > 0` on a day this happened.
+
+## Plan math version (Part 4.8a)
+
+`ai.verdicts.plan_math_version` names the `grading/plan_math.py` rules a row was built with. **NULL means 1**: every row before 4.8a (migration 009 adds the column and backfills nothing; `db.journal_rows` reads `COALESCE(plan_math_version, 1)`). `GET /journal/stats` never averages two versions. Bump `PLAN_MATH_VERSION` on any rule change.
+
+To rerun plan math over stored verdicts without an LLM call (v1 = the pre-4.8a module from git; the account is a placeholder and no size is printed):
+
+```bash
+git show 0954e43:services/ai-agent/grading/plan_math.py > /tmp/plan_math_v1.py && docker cp /tmp/plan_math_v1.py tf-ai-agent-dev:/tmp/plan_math_v1.py
+```
+
+```bash
+docker exec -i tf-postgres bash -c 'PGUSER="$POSTGRES_USER" PGPASSWORD="$POSTGRES_PASSWORD" PGDATABASE="$POSTGRES_DB" exec psql -qAt -v ON_ERROR_STOP=1 -c "SET default_transaction_read_only = on; SELECT json_agg(json_build_object('"'"'verdictId'"'"', id, '"'"'ticker'"'"', ticker, '"'"'entry'"'"', entry, '"'"'indicators'"'"', dossier->'"'"'sections'"'"'->'"'"'indicators'"'"') ORDER BY asked_at) FROM ai.verdicts WHERE asked_at >= now() - interval '"'"'7 days'"'"';"' > /tmp/rows.json
+```
+
+```bash
+docker exec -i tf-ai-agent-dev python -m scripts.plan_math_rerun --v1 /tmp/plan_math_v1.py < /tmp/rows.json
+```

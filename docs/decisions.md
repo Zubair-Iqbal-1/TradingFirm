@@ -1112,3 +1112,18 @@ On all four pre-expiry nights the 00:15 reading sat at ES −0.85…−0.95 / NQ
 **Why:** GOOGL's verdict of 2026-09-22 read `ext20 = 1.33` / `ext50 = 1.07` (ATR multiples) as "33 % / 6.9 % above the EMA". Text only, no level came from the model, but the same misreading would reach 4.7's similar-case buckets. The first verdict on the new prompt (OUST) wrote "nearly 1 ATR above its 20EMA" against a stored `ext20Atr` of 0.9813. Spec `docs/specs/verdict-units.md`.
 
 **Supersedes:** N/A.
+
+---
+
+## 2026-09-22 — 4.8 is three parts; plan math v2 (T1 ≥ 1.5R, 6-ATR cap, far-support stop, version stamp)
+
+**Decision:** the plan file's row 4.8 (the manual live check) was done inside 4.4 as `scripts/analyze_live.sh`; 4.8 now means the plan-math / prompt / model work, split into **4.8a** plan math (this entry), **4.8b** prompt + classifier, **4.8c** model comparison, plus **4.8a-de** on data-engine (`lastSwingLow`, held / broke counts per zone over the full bar history, zones on the full history). Plan math v2 (`grading/plan_math.py`, `PLAN_MATH_VERSION = 2`):
+- **T1 is the first resistance zone paying ≥ 1.5R**; nearer zones are `overhead` (price, R, basis), listed to three, the walk continuing past them. The journal's `target_hit` (judged on `targets[0]`) so measures T1 by construction. Closes the "target_hit judged on T1" item above.
+- **A target more than `6×ATR14` above the entry is dropped** before the walk (VITL's 30.48 target on 12.23 goes for any ATR below 3.04). Closes the "target distance cap" item above.
+- **Far support:** when the support-zone stop's risk exceeds `2×ATR14`, or there is no support zone, the stop is the highest of the zone stop and `EMA20 − 1×ATR` (and `swing low − 1×ATR` once 4.8a-de sends it), each valid only at or below the entry. Zones re-split around the entry by their midpoint: a straddling zone is overhead at its high (midpoint ≥ entry) or the stop zone (midpoint < entry).
+- **Size** also respects a 2.5 % loss at the disaster line (`lossAtDisasterPct` on the plan). Every level carries a `basis` string in cents (closes verdict-units decision 6).
+- **`ai.verdicts.plan_math_version`** (migration 009, NULL = 1), `prompt_inputs.planMathVersion`, and `planMath` in the cache fingerprint; `GET /journal/stats` groups by model × version and adds a stop-hit rate by risk-in-ATR bucket. `PROJECTION_VERSION` 3.
+
+**Why:** 9 of the 10 verdicts of 2026-09-22 waited on a sub-1.5R T1 (OUST 0.33R, CNK 0.12R, AAL 0.81R, IAG 0.97R, GOOGL 1.14R), the model citing it each time; OUST's support-zone stop took 3.66 ATR of risk. The no-LLM rerun of the ten (spec 4.8a decision 9): v1 6 / 10 valid with one T1 ≥ 1.5R; v2 5 / 10 valid, every T1 ≥ 1.5R, OPCH lost to the cap (nearest resistance 7.0 ATR up). The constants (6, 2, 2.5) are provisional; the version stamp is what lets the journal retune them without mixing eras.
+
+**Supersedes:** the plan file's row 4.8 (its live check is `scripts/analyze_live.sh`, 4.4); the two "Recorded, not decided" items of 2026-09-22 "Open for 4.8".
