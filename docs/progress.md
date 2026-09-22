@@ -2,17 +2,17 @@
 
 One row per part from `docs/plan-analyst-watcher.md`. Updated at the end of every part, before the commit.
 
-## Next: 4.5 (journal scoring), then 4.7, then 4.6
+## Next: 4.7 (similar cases), then 4.6 — after tonight's slot report and the remaining seven
 
-- **Order: 4.5 → 4.7 → 4.6.** 4.4 is closed (CI run #15).
-- **Base:** the commit that adds this block (`docs: CI run #15 closes 4.4; next-part block`); check that `git log origin/main -1` shows it. Suites at run #15: data-engine 504, risk-shield 857, ai-agent 629. All green, 0 skipped.
-- **Read for 4.5:** plan row 4.5, spec 4.4 (`ai.verdicts`, `ai.verdict_outcomes`), `docs/decisions.md` from 2026-09-21. Two real AAPL verdicts are in `ai.verdicts` to score.
+- **Order: 4.7 → 4.6.** 4.5 is deployed (image `658499d72803`, 008 on prod, CI #17). The verdict-units fix is closed: `85ab4b9` + `120bebe` (code, CI [#22](https://github.com/Zubair-Iqbal-1/TradingFirm/actions/runs/35711999684): data-engine 506, risk-shield 857, ai-agent 795) and `dcfdd8a` (docs); prod ai-agent runs `96c54e3d3de1` since 05:49 ET 2026-09-22, rollback tag `rollback-verdict-units-base` = `658499d72803`.
+- **Base:** the commit that adds this block; check `git log origin/main -1` shows it.
+- **Still owed from 2026-09-22:** the first 17:30 ET journal slot report (`journalLastResult`, the +1 rows for AAPL ×2, GOOGL, OUST, AAL and IAG — all day 0 = 09-21 — the refresh log line, `/usage`), then a `docs:` line on the 4.5 row.
+- **Verdicts on 2026-09-22, all `wait`:** GOOGL 52 on the old prompt (`8dee4d5b`); on the new prompt OUST 58 (`6c1da5ac`), AAL 45 (`20824f75`), IAG 45 (`2baca035`). Spend today $0.169594. **Remaining seven of the ten:** OPCH, CNK, MSFT, RIOT, AMZN, CLSK, HUT — one at a time, each on a "go <ticker>", `scripts/analyze_live.sh`. **The twelfth is still unnamed** (the list said twelve, named eleven). Candidate list from now on = scanner winners + hand picks, no extra filter.
+- **Benchmarks:** SPY + XLI, XLC, XLB, XLV, XLK have bars since 05:51 ET; `rsSector*` fills only for tickers with a `data_engine.stocks` row (scan winners), so MSFT, RIOT, AMZN, CLSK, HUT, GOOGL keep `sector: null` until a scan writes one.
 - **The earnings-hold decision joins 4.7.** Code summarizes the 8 stored earnings reactions; the model decides hold / exit-before and cites them; a worst stored move larger than the stop distance forces exit-before in code, whatever the model says.
-- **4.5 is built and CI-green (run #17); its deploy waits for a go** (row below; AAPL scores at +1 09-22, +5 09-28, +20 10-19, +30 11-02, +60 12-15): migration 008 first, then the ai-agent build + up outside 17:25–18:15 ET. **`d82c16e` rides that rebuild**, named in the deploy report and inside the green CI run. From then on ai-agent has a scheduled writer (the 17:30 ET journal slot).
-- **Open for 4.8:**
-  - **Reasoning tokens were 0 at effort `low`** on all three live calls. Compare `low` against `medium` on the five tickers: verdict quality, tokens, cost.
-  - **The five-ticker run** with `./scripts/analyze_live.sh`, about $0.058 a ticker on a first analyze.
-- **Open items (none are 4.5's):**
+- **Raise at 4.7:** a "no numbers in `invalidation`" prompt line — AAL's invalidation quoted the 20 EMA value (13.33), an input not an invention, but rule 2's spirit is a condition without a number. Also: 4.7 reads `prompt_inputs` keys, which are a contract since the units fix (`projectionVersion` 2; rows before 2026-09-22 05:49 ET have the old names, version absent).
+- **Raise at 4.8:** first targets under 1R on all three of today's plans (OUST 0.33R, AAL 0.81R, IAG 0.97R) and the model waited on each, citing it; with the target-distance cap (decisions 2026-09-22). Also the `low` vs `medium` effort comparison and `stopBasis` rounding (spec verdict-units decision 6).
+- **Open items:**
   - **Bar-date audit (2026-09-22, findings from 4.5's review, not fixed):**
     - (a) Scanner RVOL (`data-engine/scanners/market_scanner.py:381-388`) scales the last daily bar as today's partial without checking its date. Guard: only if its `ts.date()` equals today's ET session date, the session taken from `exchange_calendars`, not weekday + hours; scale by the session's real length (210 min on an early close, not 390). Manual scans only today, so no action now. **Phase 6's 5-minute bar builder must not inherit the assumption: raise it at 6.3's G1.**
     - (b) yfinance pin bump: the daily index must stay naive / midnight UTC, or the write path (`db.py:546`) normalises it before upsert; add a test on the stored ts shape at the next bump.
