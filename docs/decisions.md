@@ -1090,3 +1090,15 @@ On all four pre-expiry nights the 00:15 reading sat at ES −0.85…−0.95 / NQ
 **Why:** the restart rule lived only in progress rows; from 4.5 a second service writes on a schedule.
 
 **Supersedes:** N/A.
+
+---
+
+## 2026-09-22 — Open for 4.8: a target distance cap, and target_hit judged on T1
+
+**Recorded, not decided:**
+- **Plan math needs a target distance cap.** VITL's third target came out at 19.21R (30.48 against a 12.23 close, +150 %): a zone artifact from `support_resistance`, which plan math takes as a real target. A cap (in R or in ATRs from entry) belongs in `grading/plan_math.py`.
+- **`target_hit` is judged on T1, and T1 pays under 1.5R on all three plans the 2026-09-22 screen produced** (GOOGL 1.14R, IAG 0.97R, OUST 0.33R; each clears 1.5R only at a later target). So the journal's target rate measures the near, weak target, not the one that makes the plan pass.
+
+**Why:** seen in the 2026-09-22 screen and plan-math preview before the live analyses.
+
+**Supersedes:** N/A.
