@@ -1102,3 +1102,13 @@ On all four pre-expiry nights the 00:15 reading sat at ES −0.85…−0.95 / NQ
 **Why:** seen in the 2026-09-22 screen and plan-math preview before the live analyses.
 
 **Supersedes:** N/A.
+
+---
+
+## 2026-09-22 — Verdict prompt inputs carry their units; key names are a contract
+
+**Decision:** every number the verdict model reads is labelled: unit suffixes on the projected keys (`ext20Atr`, `pos52wFrac`, `atr14Usd`, `avgDollarVolume20Usd`, `rsSpy5Pct`, `marketCapUsdM`), two code-computed `aboveEma20Pct` / `aboveEma50Pct`, a legend in `prompts/verdict.md`, and an allowlist projection pinned to data-engine's `IndicatorsResponse` on both sides. `analyze.PROJECTION_VERSION` joins the cache fingerprint and the stored `prompt_inputs`. From now on the projected key names are a contract: 4.7 reads them from `ai.verdicts.prompt_inputs`.
+
+**Why:** GOOGL's verdict of 2026-09-22 read `ext20 = 1.33` / `ext50 = 1.07` (ATR multiples) as "33 % / 6.9 % above the EMA". Text only, no level came from the model, but the same misreading would reach 4.7's similar-case buckets. The first verdict on the new prompt (OUST) wrote "nearly 1 ATR above its 20EMA" against a stored `ext20Atr` of 0.9813. Spec `docs/specs/verdict-units.md`.
+
+**Supersedes:** N/A.
