@@ -371,3 +371,35 @@ async def test_refresh_invalidates_indicators_cache(full_pool):
     assert "tf:cache:refresh:AAPL" in redis.keys()  # cooldown still set
     after = await main.get_indicators("AAPL")
     assert after.cached is False
+
+
+# ── The contract ai-agent's verdict projection reads (spec verdict-units) ──
+
+# The other side is ai-agent's test_indicator_keys_pinned_to_data_engine,
+# which holds this list too and maps each key to a projected name with its
+# unit. Change both or neither: a field added here reaches the model only
+# once ai-agent names it with a unit.
+AI_AGENT_INDICATOR_FIELDS = [
+    "ticker", "asOf", "bars", "close", "sector", "ema20", "ema50", "ema200", "atr14", "rvol",
+    "rsi14", "macd", "macdSignal", "macdHist", "pos52w", "ext20", "ext50", "rsSpy5", "rsSpy20",
+    "rsSector5", "rsSector20", "avgDollarVolume20", "gapPct", "gaps20", "zones", "benchmarks",
+    "computedAt", "cached",
+]
+
+
+def test_indicator_fields_pinned_for_ai_agent():
+    import inspect
+
+    from dossier import assemble
+    from dossier.models import ProfileSection
+    from providers.context import finnhub
+
+    aliases = [f.alias or name for name, f in IndicatorsResponse.model_fields.items()]
+    assert aliases == AI_AGENT_INDICATOR_FIELDS
+
+    # profile.marketCap: ai-agent projects it as `marketCapUsdM`, millions of
+    # USD, which is only true while it comes from Finnhub profile2 unchanged.
+    field = ProfileSection.model_fields["market_cap"]
+    assert field.alias == "marketCap" and "millions of USD" in (field.description or "")
+    assert 'raw.get("marketCapitalization")' in inspect.getsource(assemble.build_profile)
+    assert "/stock/profile2" in inspect.getsource(finnhub.profile)

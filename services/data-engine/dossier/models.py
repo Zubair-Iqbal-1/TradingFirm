@@ -178,7 +178,12 @@ class ProfileSection(Section):
     exchange: Optional[str] = None
     industry: Optional[str] = None
     ipo: Optional[date] = None
-    market_cap: Optional[float] = Field(None, alias="marketCap")
+    # Millions of USD: Finnhub profile2's `marketCapitalization`, passed
+    # through unchanged (assemble.build_profile). ai-agent projects it as
+    # `marketCapUsdM` (spec verdict-units); test_indicator_fields_pinned_for_ai_agent
+    # pins the source. A source that reports raw dollars (yfinance) must convert.
+    market_cap: Optional[float] = Field(None, alias="marketCap",
+                                        description="millions of USD, Finnhub profile2")
     shares_outstanding: Optional[float] = Field(None, alias="sharesOutstanding")
     weburl: Optional[str] = None
     logo: Optional[str] = None
