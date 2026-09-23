@@ -173,10 +173,10 @@ If Postgres fails after the model answered, `/analyze` still returns the verdict
 
 `ai.verdicts.plan_math_version` names the `grading/plan_math.py` rules a row was built with. **NULL means 1**: every row before 4.8a (migration 009 adds the column and backfills nothing; `db.journal_rows` reads `COALESCE(plan_math_version, 1)`). `GET /journal/stats` never averages two versions. Bump `PLAN_MATH_VERSION` on any rule change.
 
-To rerun plan math over stored verdicts without an LLM call (v1 = the pre-4.8a module from git; the account is a placeholder and no size is printed):
+To rerun plan math over stored verdicts without an LLM call (`--prev` = an earlier module from git, labelled by its own version: v1 `0954e43`, v2 `0675990`; the account is a placeholder and no size is printed):
 
 ```bash
-git show 0954e43:services/ai-agent/grading/plan_math.py > /tmp/plan_math_v1.py && docker cp /tmp/plan_math_v1.py tf-ai-agent-dev:/tmp/plan_math_v1.py
+git show 0675990:services/ai-agent/grading/plan_math.py > /tmp/plan_math_v2.py && docker cp /tmp/plan_math_v2.py tf-ai-agent-dev:/tmp/plan_math_v2.py
 ```
 
 ```bash
@@ -184,5 +184,7 @@ docker exec -i tf-postgres bash -c 'PGUSER="$POSTGRES_USER" PGPASSWORD="$POSTGRE
 ```
 
 ```bash
-docker exec -i tf-ai-agent-dev python -m scripts.plan_math_rerun --v1 /tmp/plan_math_v1.py < /tmp/rows.json
+docker exec -i tf-ai-agent-dev python -m scripts.plan_math_rerun --prev /tmp/plan_math_v2.py < /tmp/rows.json
 ```
+
+Since 4.8a-de the rerun can also take **fresh inputs** recomputed from the stored bars (full-history zones with `touches` / `held` / `broke` / `lastTouch`, and `lastSwingLow`): export each verdict's ticker, `asOf` (`dossier->>'asOf'`), stored close and the ticker's daily bars read-only, run `docker exec -i tf-data-engine-dev python -m scripts.snapshot_from_bars < bars_rows.json > fresh.json` (bars after `asOf` are dropped, a `closeMismatch` is flagged), and put each result's `indicators` on the row as `fresh`. The table then shows three rows per verdict: the previous module on the stored inputs, the previous module on the fresh inputs with the swing low withheld (zone drift alone), the current module on the fresh inputs; plus the nearest stored vs fresh zone per ticker.
