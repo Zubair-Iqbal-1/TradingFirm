@@ -175,7 +175,8 @@ def test_support_resistance_splits_by_last_close_and_ranks_by_score():
     assert [z.score for z in out["resistance"]] == [40, 0]
 
     top = out["resistance"][0]
-    assert top == Zone(107.5, 108.0, 107.75, 40, ("swing_high",), 1, True, True)
+    # 4.8a-de: the zone carries its history (2 touches, both held; no date on a RangeIndex)
+    assert top == Zone(107.5, 108.0, 107.75, 40, ("swing_high",), 1, True, True, 2, 2, 0, None)
 
     # Zone price == last close -> resistance, not support. Moving the last
     # close onto the 107.75 zone changes only that bar's bin (still bin
@@ -264,3 +265,154 @@ def test_volume_nodes_skips_nan_volume():
     volume = pd.Series([10, np.nan, 20, 30], dtype=float)
     # Bin 1 (the 40 in the happy-path test) is now NaN and dropped.
     assert volume_nodes(high, low, close, volume, n_bins=4, top_nodes=2) == [103.5, 102.5]
+
+
+# ── Part 4.8a-de: zone history and the last swing low ─────────────────────
+#
+# On the shared 17-bar series, hand-walked (spec 4.8a-de decision 2):
+#   band [99.6, 100]  reach at 2 (approach from above: bar 1 close 101);
+#                     close 100.5 above at e0 → held. Reach 7-10 (approach
+#                     above, bar 6 close 102): close 7 = 100 inside, close
+#                     8 = 96 below = far → broke. Reach 14 (approach above,
+#                     bar 13 close 107): close 14 = 100 inside, close 15 =
+#                     103 above at e0+1 → held.        → 3 / 2 / 1, last 14
+#   band [107.5, 108] reach 5 (approach below): close 108 inside, close 6
+#                     = 102 below at e0+1 → held. Reach 12 (approach below,
+#                     bar 11 close 104): close 106 below at e0 → held.
+#                                                        → 2 / 2 / 0, last 12
+#   band [95, 95]     reach 8 only (approach above): close 96 → held → 1/1/0
+#   band [110, 110]   reach 5 only (approach below): close 108 → held → 1/1/0
+
+from indicators import SwingLow, ZoneHistory, last_swing_low, zone_history  # noqa: E402
+
+
+def _hist(band, high=HIGH, low=LOW, close=CLOSE, **kw):
+    return zone_history(high, low, close, *band, **kw)
+
+
+def _bars(rows):
+    """rows of (high, low, close) → three Series."""
+    h, lo, c = zip(*rows)
+    return (pd.Series(h, dtype=float), pd.Series(lo, dtype=float), pd.Series(c, dtype=float))
+
+
+def test_zone_history_counts_touch_held_broke():
+    assert _hist((99.6, 100.0)) == ZoneHistory(3, 2, 1, 14)
+    assert _hist((107.5, 108.0)) == ZoneHistory(2, 2, 0, 12)
+    assert _hist((95.0, 95.0)) == ZoneHistory(1, 1, 0, 8)
+    assert _hist((110.0, 110.0)) == ZoneHistory(1, 1, 0, 5)
+    # a band the series never reaches
+    assert _hist((120.0, 121.0)) == ZoneHistory(0, 0, 0, None)
+
+
+def test_zone_history_far_close_in_episode_beats_earlier_hold():
+    """Approval change 1: resistance 50.00-50.20 from below; day 1 high 50.10
+    close 49.80 (an approach-side close), day 2 low 49.90 high 50.60 close
+    50.50 (a far close in the same episode) → broke, not held."""
+    h, lo, c = _bars([(49.8, 49.0, 49.5), (50.1, 49.5, 49.8), (50.6, 49.9, 50.5), (51.0, 50.4, 50.8)])
+    assert zone_history(h, lo, c, 50.0, 50.2) == ZoneHistory(1, 0, 1, 2)
+
+
+def test_zone_history_touch_that_holds_on_its_own_close():
+    h, lo, c = _bars([(49.8, 49.0, 49.5), (50.1, 49.5, 49.8), (49.9, 49.2, 49.6)])
+    assert zone_history(h, lo, c, 50.0, 50.2) == ZoneHistory(1, 1, 0, 1)
+    # the last bar of an episode also starts its window: no close after it → undecided
+    assert zone_history(h[:2], lo[:2], c[:2], 50.0, 50.2) == ZoneHistory(1, 0, 0, 1)
+
+
+def test_zone_history_slow_rejection_is_undecided():
+    """Five closes inside the band, then a close back on the approach side at
+    e0+5: no far close, but the hold came too late → undecided."""
+    rows = [(49.8, 49.0, 49.5)] + [(50.3, 49.9, 50.1)] * 5 + [(49.8, 49.0, 49.5)]
+    h, lo, c = _bars(rows)
+    assert zone_history(h, lo, c, 50.0, 50.2) == ZoneHistory(1, 0, 0, 5)
+    # the same shape rejected at e0+3 is held
+    rows = [(49.8, 49.0, 49.5)] + [(50.3, 49.9, 50.1)] * 3 + [(49.8, 49.0, 49.5)]
+    h, lo, c = _bars(rows)
+    assert zone_history(h, lo, c, 50.0, 50.2) == ZoneHistory(1, 1, 0, 3)
+    # hold_bars is the knob
+    assert zone_history(h, lo, c, 50.0, 50.2, hold_bars=2) == ZoneHistory(1, 0, 0, 3)
+
+
+def test_zone_history_gap_through_band_is_a_break():
+    # day 1 opens and closes above the band without a bar inside it
+    h, lo, c = _bars([(49.8, 49.0, 49.5), (51.5, 50.5, 51.0), (51.8, 51.0, 51.3)])
+    assert zone_history(h, lo, c, 50.0, 50.2) == ZoneHistory(1, 0, 1, 1)
+    # the bar after an episode is judged by the outcome rule, never as a jump
+    h, lo, c = _bars([(49.8, 49.0, 49.5), (50.1, 49.5, 49.8), (51.5, 50.5, 51.0)])
+    assert zone_history(h, lo, c, 50.0, 50.2) == ZoneHistory(1, 0, 1, 1)
+
+
+def test_zone_history_approach_side_flips():
+    """Held from below, a gap through it, then held from above: counts are
+    side-agnostic (decisions 2026-09-23)."""
+    h, lo, c = _bars([
+        (49.8, 49.0, 49.5), (50.1, 49.6, 49.7), (49.9, 49.0, 49.6),   # held from below
+        (52.0, 51.0, 51.5), (51.8, 51.0, 51.3),                        # jump: broke
+        (51.2, 50.1, 50.9), (51.5, 50.6, 51.0),                        # held from above
+    ])
+    assert zone_history(h, lo, c, 50.0, 50.2) == ZoneHistory(3, 2, 1, 5)
+
+
+def test_zone_history_skips_until_a_close_outside():
+    # the series opens inside the band: no approach side, so no touch until
+    # a close outside exists
+    h, lo, c = _bars([(50.15, 49.95, 50.10), (50.15, 49.95, 50.05), (49.8, 49.0, 49.5),
+                      (50.1, 49.5, 49.8), (49.9, 49.2, 49.6)])
+    assert zone_history(h, lo, c, 50.0, 50.2) == ZoneHistory(1, 1, 0, 3)
+
+
+def test_zone_history_nan_bars_ignored():
+    # a NaN bar ends the episode and is not a valid close; the next valid
+    # close (e0+2, approach side) completes the window → held
+    h, lo, c = _bars([(49.8, 49.0, 49.5), (50.1, 49.5, 49.8), (np.nan, np.nan, np.nan),
+                      (49.9, 49.2, 49.6), (50.1, 49.5, 49.9), (49.9, 49.2, 49.6)])
+    assert zone_history(h, lo, c, 50.0, 50.2) == ZoneHistory(2, 2, 0, 4)
+    # a NaN close alone disqualifies the bar too
+    h, lo, c = _bars([(49.8, 49.0, 49.5), (50.1, 49.5, np.nan), (49.9, 49.2, 49.6)])
+    assert zone_history(h, lo, c, 50.0, 50.2) == ZoneHistory(0, 0, 0, None)
+
+
+def test_zone_history_open_episode_is_undecided():
+    # the series ends while price sits at the level: not yet held
+    h, lo, c = _bars([(49.8, 49.0, 49.5), (50.1, 49.5, 49.8), (50.3, 49.9, 50.1)])
+    assert zone_history(h, lo, c, 50.0, 50.2) == ZoneHistory(1, 0, 0, 2)
+    # but a far close already seen is a break whatever follows
+    h, lo, c = _bars([(49.8, 49.0, 49.5), (50.6, 49.9, 50.5), (50.3, 49.9, 50.1)])
+    assert zone_history(h, lo, c, 50.0, 50.2) == ZoneHistory(1, 0, 1, 2)
+
+
+def test_zone_history_empty_series():
+    assert zone_history(EMPTY, EMPTY, EMPTY, 50.0, 50.2) == ZoneHistory(0, 0, 0, None)
+    with pytest.raises(ValueError):
+        zone_history(HIGH, LOW, CLOSE[:3], 50.0, 50.2)
+    with pytest.raises(ValueError):
+        zone_history(HIGH, LOW, CLOSE, 50.2, 50.0)
+
+
+def test_support_resistance_zones_carry_history():
+    out = _run()
+    by_price = {round(z.price, 2): z for z in out["support"] + out["resistance"]}
+    assert (by_price[99.8].touches, by_price[99.8].held, by_price[99.8].broke) == (3, 2, 1)
+    assert (by_price[107.75].touches, by_price[107.75].held, by_price[107.75].broke) == (2, 2, 0)
+    # a RangeIndex has no date to name
+    assert by_price[99.8].last_touch is None
+    # a DatetimeIndex names the last touch by its bar date, no tz conversion
+    idx = pd.date_range("2026-01-01", periods=len(CLOSE), freq="D", tz="UTC")
+    dated = support_resistance(HIGH.set_axis(idx), LOW.set_axis(idx), CLOSE.set_axis(idx),
+                               VOLUME.set_axis(idx), n_bins=15, top_nodes=1, recent_bars=5)
+    dated_by_price = {round(z.price, 2): z for z in dated["support"] + dated["resistance"]}
+    assert dated_by_price[99.8].last_touch == "2026-01-15"
+    assert dated_by_price[107.75].last_touch == "2026-01-13"
+
+
+def test_last_swing_low_is_newest_pivot():
+    # swing lows at 2 (100), 8 (95), 14 (99.6): the newest wins, not the lowest
+    assert last_swing_low(HIGH, LOW) == SwingLow(99.6, 14)
+
+
+def test_last_swing_low_none_without_pivot():
+    assert last_swing_low(HIGH[:4], LOW[:4]) is None
+    assert last_swing_low(EMPTY, EMPTY) is None
+    flat = pd.Series([100.0] * 9)
+    assert last_swing_low(flat, flat) is None

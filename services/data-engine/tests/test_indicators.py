@@ -189,12 +189,13 @@ def test_gap_matches_hand_computed():
 
 def test_package_exports_all_public_names():
     expected = [
-        "IndicatorsResponse", "Zone", "aggregate_4h", "avg_dollar_volume", "calc_atr",
+        "IndicatorsResponse", "SwingLow", "Zone", "ZoneHistory", "aggregate_4h",
+        "avg_dollar_volume", "calc_atr",
         "calc_atrp", "calc_rvol", "check_52w_position", "earnings_reactions", "ema",
         "extension",
-        "fractal_swings", "gap", "macd", "merge_levels", "relative_strength", "rsi",
+        "fractal_swings", "gap", "last_swing_low", "macd", "merge_levels", "relative_strength", "rsi",
         "score_zones", "sector_etf", "support_resistance", "swing_snapshot",
-        "volume_nodes", "zone_to_dict",
+        "volume_nodes", "zone_history", "zone_to_dict",
     ]
     assert sorted(indicators.__all__) == expected
     for name in expected:

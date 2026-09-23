@@ -591,5 +591,5 @@ def test_indicators_exports_earnings_reactions():
     import indicators
 
     assert "earnings_reactions" in indicators.__all__
-    assert len(indicators.__all__) == 23
+    assert len(indicators.__all__) == 27   # 4.8a-de: SwingLow, ZoneHistory, last_swing_low, zone_history
     assert indicators.earnings_reactions is earnings_reactions

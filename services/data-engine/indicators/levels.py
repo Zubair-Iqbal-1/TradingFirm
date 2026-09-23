@@ -26,9 +26,14 @@ Conventions (docs/decisions.md, Part 1.6):
     included).
   - Support / resistance split on zone price vs last valid close;
     zone price == close is resistance.
+  - Zone history (Part 4.8a-de, spec decision 2): `touches`, `held`,
+    `broke`, `last_touch` per returned zone, over the full series, counted
+    across both approach sides (a rejection from above counts as held
+    like one from below; docs/decisions.md 2026-09-23).
 """
 
 from dataclasses import dataclass
+from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -38,6 +43,7 @@ Level = tuple[float, str, int | None]
 SWING_HIGH = "swing_high"
 SWING_LOW = "swing_low"
 VOLUME = "volume"
+HOLD_BARS = 3
 
 
 @dataclass(frozen=True)
@@ -50,6 +56,26 @@ class Zone:
     tests: int
     recent: bool
     volume_node: bool
+    # Part 4.8a-de: how the level behaved over the full stored history.
+    # Defaults keep the 1.6 constructor and a cached pre-part body valid.
+    touches: int = 0
+    held: int = 0
+    broke: int = 0
+    last_touch: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class ZoneHistory:
+    touches: int
+    held: int
+    broke: int
+    last_index: Optional[int]      # positional index of the newest episode's last bar
+
+
+@dataclass(frozen=True)
+class SwingLow:
+    price: float
+    index: int                     # positional index of the pivot bar
 
 
 # ── Stage 1a: fractal swings ──────────────────────────────────────────────
@@ -95,6 +121,133 @@ def fractal_swings(
         if lo[i] < lo[left].min() and lo[i] < lo[right].min():
             lows.append(i)
     return highs, lows
+
+
+def last_swing_low(high: pd.Series, low: pd.Series, wing: int = 2) -> Optional[SwingLow]:
+    """
+    The newest fractal swing low (Part 4.8a-de, spec decision 3): the last
+    index `fractal_swings` returns for lows, with its price. Confirmed by
+    construction (a fractal needs `wing` bars after it). None with fewer
+    than 2 * wing + 1 bars or no pivot.
+    """
+    _, lows = fractal_swings(high, low, wing=wing)
+    if not lows:
+        return None
+    i = lows[-1]
+    return SwingLow(float(low.to_numpy(dtype=float)[i]), i)
+
+
+# ── Stage 1c: zone history ────────────────────────────────────────────────
+
+
+def zone_history(
+    high: pd.Series,
+    low: pd.Series,
+    close: pd.Series,
+    zone_low: float,
+    zone_high: float,
+    hold_bars: int = HOLD_BARS,
+) -> ZoneHistory:
+    """
+    How the band [zone_low, zone_high] behaved over the series (Part
+    4.8a-de, spec decision 2, as approved):
+
+      reach    a bar's range overlaps the band (high >= zone_low and
+               low <= zone_high)
+      jump     a bar that does not reach the band, whose close is on the
+               opposite side of it from the last valid close outside the
+               band, and that does not directly follow an episode (that
+               bar belongs to the episode's outcome window instead)
+      episode  a maximal run of consecutive reaching bars, or one jump bar;
+               one episode is one touch
+      approach the side (below / above the band) of the last valid close
+               outside the band before the episode; an episode with none
+               (the series starts inside the band) is skipped
+      outcome  judged on the closes from the episode's first bar e0 through
+               the first valid close after its last bar:
+                 broke      any close in that window on the far side
+                 held       no far close, the window complete, and an
+                            approach-side close within e0 .. e0+hold_bars
+                 undecided  otherwise (a slow rejection, or a window the
+                            series ends before completing)
+
+    A bar with a NaN high, low or close never reaches or jumps, ends an
+    episode, and its close is not a valid close. Counts are side-agnostic:
+    held includes rejections from above as well as from below.
+
+    Returns ZoneHistory(touches, held, broke, last_index) with last_index
+    the positional index of the newest episode's last bar (None if none).
+    """
+    if not len(high) == len(low) == len(close):
+        raise ValueError("high, low and close must have the same length")
+    if zone_high < zone_low:
+        raise ValueError("zone_high must be >= zone_low")
+
+    h = high.to_numpy(dtype=float)
+    lo = low.to_numpy(dtype=float)
+    c = close.to_numpy(dtype=float)
+    n = len(c)
+    valid = ~(np.isnan(h) | np.isnan(lo) | np.isnan(c))
+    reach = valid & (h >= zone_low) & (lo <= zone_high)
+
+    def side(i: int) -> int:
+        """-1 below the band, +1 above, 0 inside or invalid."""
+        if not valid[i]:
+            return 0
+        if c[i] < zone_low:
+            return -1
+        if c[i] > zone_high:
+            return 1
+        return 0
+
+    touches = held = broke = 0
+    last_index: Optional[int] = None
+    last_outside = 0          # side of the last valid close outside the band
+    last_episode_end = -2     # index of the last episode's final bar
+
+    def outcome(start: int, end: int, approach: int) -> str:
+        far = -approach
+        for i in range(start, n):
+            s = side(i)
+            if s == far:
+                return "broke"
+            if i > end and s != 0:
+                # the first valid close after the last bar: the window is complete
+                break
+        else:
+            return "undecided"
+        for i in range(start, min(start + hold_bars, n - 1) + 1):
+            if side(i) == approach:
+                return "held"
+        return "undecided"
+
+    i = 0
+    while i < n:
+        if reach[i]:
+            start = i
+            while i + 1 < n and reach[i + 1]:
+                i += 1
+            end = i
+            if last_outside != 0:
+                touches += 1
+                last_index = end
+                result = outcome(start, end, last_outside)
+                held += result == "held"
+                broke += result == "broke"
+            for j in range(start, end + 1):
+                last_outside = side(j) or last_outside
+            last_episode_end = end
+        else:
+            s = side(i)
+            if (s != 0 and last_outside != 0 and s == -last_outside
+                    and i != last_episode_end + 1):
+                touches += 1
+                broke += 1
+                last_index = i
+                last_episode_end = i
+            last_outside = s or last_outside
+        i += 1
+    return ZoneHistory(touches, held, broke, last_index)
 
 
 # ── Stage 1b: volume nodes ────────────────────────────────────────────────
@@ -291,4 +444,20 @@ def support_resistance(
 
     support = sorted((z for z in zones if z.price < last_close), key=rank)[:top_n]
     resistance = sorted((z for z in zones if z.price >= last_close), key=rank)[:top_n]
-    return {"support": support, "resistance": resistance}
+    return {"support": [_with_history(z, high, low, close) for z in support],
+            "resistance": [_with_history(z, high, low, close) for z in resistance]}
+
+
+def _with_history(zone: Zone, high: pd.Series, low: pd.Series, close: pd.Series) -> Zone:
+    """The zone plus its history over the full series (4.8a-de). The last
+    touch is an ISO date when the series carries a DatetimeIndex (stored
+    daily bars: the date is `ts.date()`, no timezone conversion), else None."""
+    hist = zone_history(high, low, close, zone.low, zone.high)
+    last: Optional[str] = None
+    if hist.last_index is not None and isinstance(close.index, pd.DatetimeIndex):
+        last = close.index[hist.last_index].date().isoformat()
+    return Zone(
+        low=zone.low, high=zone.high, price=zone.price, score=zone.score,
+        methods=zone.methods, tests=zone.tests, recent=zone.recent, volume_node=zone.volume_node,
+        touches=hist.touches, held=hist.held, broke=hist.broke, last_touch=last,
+    )

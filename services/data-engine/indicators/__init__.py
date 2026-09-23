@@ -8,12 +8,16 @@ detail. Every public function is re-exported here.
 
 from indicators.earnings import earnings_reactions
 from indicators.levels import (
+    SwingLow,
     Zone,
+    ZoneHistory,
     fractal_swings,
+    last_swing_low,
     merge_levels,
     score_zones,
     support_resistance,
     volume_nodes,
+    zone_history,
 )
 from indicators.momentum import check_52w_position, macd, relative_strength, rsi
 from indicators.moving_averages import aggregate_4h, ema
@@ -25,7 +29,9 @@ from indicators.snapshot import swing_snapshot, zone_to_dict
 
 __all__ = [
     "IndicatorsResponse",
+    "SwingLow",
     "Zone",
+    "ZoneHistory",
     "aggregate_4h",
     "avg_dollar_volume",
     "calc_atr",
@@ -37,6 +43,7 @@ __all__ = [
     "extension",
     "fractal_swings",
     "gap",
+    "last_swing_low",
     "macd",
     "merge_levels",
     "relative_strength",
@@ -46,5 +53,6 @@ __all__ = [
     "support_resistance",
     "swing_snapshot",
     "volume_nodes",
+    "zone_history",
     "zone_to_dict",
 ]
