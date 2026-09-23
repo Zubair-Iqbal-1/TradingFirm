@@ -1127,3 +1127,13 @@ On all four pre-expiry nights the 00:15 reading sat at ES −0.85…−0.95 / NQ
 **Why:** 9 of the 10 verdicts of 2026-09-22 waited on a sub-1.5R T1 (OUST 0.33R, CNK 0.12R, AAL 0.81R, IAG 0.97R, GOOGL 1.14R), the model citing it each time; OUST's support-zone stop took 3.66 ATR of risk. The no-LLM rerun of the ten (spec 4.8a decision 9): v1 6 / 10 valid with one T1 ≥ 1.5R; v2 5 / 10 valid, every T1 ≥ 1.5R, OPCH lost to the cap (nearest resistance 7.0 ATR up). The constants (6, 2, 2.5) are provisional; the version stamp is what lets the journal retune them without mixing eras.
 
 **Supersedes:** the plan file's row 4.8 (its live check is `scripts/analyze_live.sh`, 4.4); the two "Recorded, not decided" items of 2026-09-22 "Open for 4.8".
+
+---
+
+## 2026-09-23 — A prod step runs only on Zubair's own "go <n>" for that single step
+
+**Decision:** no production action (migration, tag, build, `up -d`, paid call, data change) runs on any wording other than Zubair's own "go <n>" naming that one step, given after the step before it is reported. Conditional phrasing in a review ("go 1–3 follow as given if …"), a listed order, or an earlier message's plan is not the word. One word, one step, one report, then the next word.
+
+**Why:** 4.8a's goes 1–3 (009 on prod, the rollback tag, the ai-agent build + `up -d`) ran in one command at 05:27 ET 2026-09-23 on the review's conditional phrase once the slot check passed. The deploy is verified and stands, but the wording was the reviewer's condition, not Zubair's go, and running three steps in one command left no report between them (the container was up two seconds after the migration). G15 says "given for that specific action"; this entry makes the wording rule explicit.
+
+**Supersedes:** N/A (sharpens G15).
