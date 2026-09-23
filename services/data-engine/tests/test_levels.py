@@ -334,6 +334,18 @@ def test_zone_history_slow_rejection_is_undecided():
     assert zone_history(h, lo, c, 50.0, 50.2, hold_bars=2) == ZoneHistory(1, 0, 0, 3)
 
 
+def test_zone_history_far_close_after_long_inside_run_is_broke():
+    """Approval change 1, the long case: six closes inside the band, then a
+    far-side close at e0+6 → broke (a far close anywhere in the window
+    wins, however late), whether that bar has left the band or still
+    reaches it."""
+    inside = (50.3, 49.9, 50.1)
+    h, lo, c = _bars([(49.8, 49.0, 49.5)] + [inside] * 6 + [(51.5, 50.5, 51.0)])
+    assert zone_history(h, lo, c, 50.0, 50.2) == ZoneHistory(1, 0, 1, 6)
+    h, lo, c = _bars([(49.8, 49.0, 49.5)] + [inside] * 6 + [(51.5, 50.1, 51.0)])
+    assert zone_history(h, lo, c, 50.0, 50.2) == ZoneHistory(1, 0, 1, 7)
+
+
 def test_zone_history_gap_through_band_is_a_break():
     # day 1 opens and closes above the band without a bar inside it
     h, lo, c = _bars([(49.8, 49.0, 49.5), (51.5, 50.5, 51.0), (51.8, 51.0, 51.3)])
