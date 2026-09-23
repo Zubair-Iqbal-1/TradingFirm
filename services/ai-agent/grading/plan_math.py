@@ -5,8 +5,9 @@ One pure function, `compute_plan`: entry + ATR + the dossier's zones (+ EMA20
 and, when a later part sends it, the last swing low) + account + risk
 percent → a long swing plan, or a named rejection.
 
-    stop zone = the support-side zone with the highest low (a zone that
-                straddles the entry with its midpoint below it counts)
+    stop zone = the support-side zone with the highest low: a zone's side
+                is data-engine's own label (`side`), the midpoint against
+                the entry only when a zone carries none         (4.8a-7)
     stop      = stop zone low − 1×ATR                                 (D11)
     far       = no stop zone, or entry − stop > 2×ATR: then the stop is the
                 highest of {stop zone stop, EMA20 − 1×ATR, swing low − 1×ATR}
@@ -27,9 +28,10 @@ Conventions (spec 4.3, kept):
   - Every input becomes Decimal(str(x)) BEFORE any arithmetic, and every
     subtraction, division and floor runs in Decimal. Only the final numbers
     go back to float.
-  - Zones are pooled (support + resistance, as data-engine sends them) and
-    re-split around the entry by their midpoint, because data-engine split
-    them around the last close by the same rule.
+  - Zones are pooled (support + resistance, as data-engine sends them),
+    each tagged with its `side` by the analyst; a zone without one (an older
+    stored dossier) is split around the entry by its midpoint, data-engine's
+    own rule applied to the entry instead of the last close.
   - Prices floor to the cent; R rounds half-up to 2 dp, and the 1.5 test
     uses the rounded R, so a printed "R 1.50" is never rejected.
   - Check order, first failure wins: arguments → ATR → stop (no_support)
@@ -159,12 +161,22 @@ def _positive(value: object, name: str) -> Decimal:
     return d
 
 
+SIDES = ("support", "resistance")
+
+
 @dataclass(frozen=True)
 class _Zone:
     low: Decimal
     high: Decimal
     mid: Decimal
     detail: str
+    side: Optional[str]
+
+    def is_support(self, entry: Decimal) -> bool:
+        """data-engine's label when the zone carries one; else the midpoint."""
+        if self.side is not None:
+            return self.side == "support"
+        return self.mid < entry
 
 
 def _zone_detail(zone: Mapping) -> str:
@@ -193,7 +205,10 @@ def _zones(zones: Sequence[Mapping]) -> list[_Zone]:
         high = _positive(zone["high"], f"zone {i} high")
         if high < low:
             raise ValueError(f"zone {i} high < low")
-        out.append(_Zone(low, high, (low + high) / TWO, _zone_detail(zone)))
+        side = zone.get("side")
+        if side is not None and side not in SIDES:
+            raise ValueError(f"zone {i} side {side!r} is not one of {SIDES}")
+        out.append(_Zone(low, high, (low + high) / TWO, _zone_detail(zone), side))
     return out
 
 
@@ -241,8 +256,9 @@ def compute_plan(
     A long plan from entry, ATR and zones, or the first check that fails.
 
     `zones` is data-engine's support + resistance lists pooled; each item
-    needs `low` and `high` (`tests`, `volumeNode`, `score` feed the basis
-    text; other keys are ignored). `risk_pct` is a percent: 1.0 means 1 % of
+    needs `low` and `high`, carries `side` ("support" / "resistance", the
+    list it came from; absent = classify by midpoint), and `tests`,
+    `volumeNode`, `score` feed the basis text; other keys are ignored. `risk_pct` is a percent: 1.0 means 1 % of
     `account`. `ema20` and `swing_low` are the stop alternatives for a name
     whose support is far below (None = not available); `swing_low_date`
     only names the swing low in the basis text.
@@ -264,10 +280,10 @@ def compute_plan(
     if a is None:
         return PlanRejected("no_atr", f"atr {atr!r} is not a positive number")
 
-    # 3. the stop: support side = midpoint below the entry (data-engine's own
-    #    split rule, applied to the entry instead of the last close)
-    support = [z for z in pool if z.mid < e]
-    resistance = [z for z in pool if z.mid >= e]
+    # 3. the stop: the support side is data-engine's label, or the midpoint
+    #    below the entry when a zone has none
+    support = [z for z in pool if z.is_support(e)]
+    resistance = [z for z in pool if not z.is_support(e)]
     stop_zone = max(support, key=lambda z: z.low) if support else None
     candidates: list[tuple[Decimal, str]] = []
     far_note: str

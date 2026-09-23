@@ -44,8 +44,10 @@ def load_v1(path: str):
 
 
 def _zones(indicators: dict) -> list:
+    """Pooled and tagged with data-engine's label, as the analyst does."""
     zones = indicators.get("zones") or {}
-    return list(zones.get("support") or []) + list(zones.get("resistance") or [])
+    return [({**z, "side": side} if isinstance(z, dict) else z)
+            for side in ("support", "resistance") for z in (zones.get(side) or [])]
 
 
 def _two(value) -> Optional[float]:

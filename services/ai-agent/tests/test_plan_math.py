@@ -172,6 +172,25 @@ def test_resistance_zone_straddling_entry_is_overhead():
     assert r == PlanRejected("low_r", "no target outside the zone straddling entry 50.0 (best R 1.73 is inside it)")
 
 
+def test_zone_side_from_label_beats_midpoint():
+    """data-engine's label decides; the midpoint is only the fallback for a
+    zone without one (older stored dossiers in the rerun)."""
+    # midpoint 50.05 says resistance, the label says support → the stop zone
+    p = plan(zones=[zone(47.80), zone(49.70, 50.40, side="support"), zone(56.90)])
+    assert p.stop == 48.50 and p.overhead == ()
+    # midpoint 49.95 says support, the label says resistance → overhead at the high
+    p = plan(zones=[zone(47.80), zone(49.50, 50.40, side="resistance"), zone(56.90)])
+    assert p.stop == 46.60 and prices(p.overhead) == [50.40]
+    # a labelled zone entirely on one side keeps its label whatever the midpoint says
+    p = plan(zones=[zone(47.80, side="support"), zone(56.90, side="resistance")])
+    assert p.stop == 46.60 and prices(p.targets) == [56.90]
+    # an unknown label is a contract break
+    with pytest.raises(ValueError, match="zone 1 side"):
+        plan(zones=[zone(47.80), zone(56.90, side="above")])
+    with pytest.raises(ValueError, match="zone 0 side"):
+        plan(zones=[zone(47.80, side=True), zone(56.90)])
+
+
 def test_zone_low_equal_to_entry_is_overhead():
     p = plan(zones=[zone(47.80), zone(50.00, 50.30), zone(56.90)])
     assert p.stop == 46.60
@@ -532,6 +551,7 @@ def test_rerun_row_error_is_reported_not_raised():
             "indicators": {"atr14": 1.2, "ema20": 47.5, "zones": {"support": ZONES_A[:2], "resistance": ZONES_A[2:]}}}
     row = rerun.rerun_row(good, v1=None, account=100_000, risk_pct=1.0)
     assert row["error"] is None
+    assert [z["side"] for z in rerun._zones(good["indicators"])] == ["support"] * 2 + ["resistance"] * 2
     assert row["v2"]["valid"] and row["v2"]["t1"] == "56.90 (2.03R)" and row["v2"]["overhead"] == 1
     assert row["v2"]["stop"] == 46.60 and row["v2"]["riskAtr"] == 2.83 and row["v2"]["stopRule"] == "support"
     text = rerun.render([row, err_row])

@@ -184,7 +184,7 @@ async def run(state, settings, ticker: str, horizon: str, entry: Optional[float]
     try:
         plan = compute_plan(
             entry=float(resolved), atr=indicators.get("atr14"),
-            zones=list(zones.get("support") or []) + list(zones.get("resistance") or []),
+            zones=analyze.tagged_zones(zones),
             account=float(account["accountSize"]), risk_pct=float(account["riskPct"]),
             ema20=indicators.get("ema20"), swing_low=swing.get("price"), swing_low_date=swing.get("date"),
         )

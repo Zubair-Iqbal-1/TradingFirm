@@ -167,6 +167,19 @@ def pct_above(close: Any, ema: Any) -> Optional[float]:
     return round((c - e) / e * 100, 2)
 
 
+def tagged_zones(zones: Any) -> list:
+    """data-engine's two zone lists pooled, each zone tagged with the list it
+    came from (`side`), so plan math reads data-engine's own label and falls
+    back to the midpoint only for a zone without one (spec 4.8a decision 7).
+    A non-dict zone is passed through for plan math to reject."""
+    zones = zones if isinstance(zones, dict) else {}
+    out = []
+    for side in ("support", "resistance"):
+        for z in zones.get(side) or []:
+            out.append({**z, "side": side} if isinstance(z, dict) else z)
+    return out
+
+
 def plan_view(plan: Union[PlanMath, PlanRejected]) -> tuple[Optional[dict], Optional[dict]]:
     """(plan, planRejection) as the model sees them. No size and no risk
     budget: the model has no use for the account, so it never sees it."""

@@ -499,6 +499,8 @@ def test_analyze_passes_swing_low_and_ema20_when_present(app, monkeypatch):
     client, world, _ = app()
     assert post(client).status_code == 200
     assert seen[-1]["ema20"] == 47.5 and seen[-1]["swing_low"] is None and seen[-1]["swing_low_date"] is None
+    assert [z["side"] for z in seen[-1]["zones"]] == ["support", "support", "resistance", "resistance"]
+    assert [z["low"] for z in seen[-1]["zones"]] == [z["low"] for z in ZONES], "data-engine's order, its label"
     world.dossier = dossier()
     world.dossier["sections"]["indicators"]["lastSwingLow"] = {"price": 48.5, "date": "2026-09-15"}
     assert post(client, fresh="true").status_code == 200
