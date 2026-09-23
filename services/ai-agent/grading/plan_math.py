@@ -14,8 +14,8 @@ percent → a long swing plan, or a named rejection.
     disaster  = stop − 1×ATR                                          (D8)
     candidates = resistance-side zone lows above entry (a zone straddling
                 the entry with its midpoint at or above it: its high),
-                floored to the cent, ascending; one farther than 6×ATR from
-                the entry is dropped                                 (4.8a-2)
+                floored to the cent, ascending; one whose distance in ATRs
+                (2 dp, half-up) exceeds 8 is dropped                 (4.8a-2)
     T1        = the first candidate paying ≥ 1.5R; every candidate before it,
                 and every one inside a straddling zone, is `overhead` (the
                 nearest three are listed; the walk continues)        (4.8a-1)
@@ -60,7 +60,7 @@ DISASTER_ATR_MULT = Decimal("1")
 MIN_BEST_R = Decimal("1.5")
 MAX_TARGETS = 3
 MAX_OVERHEAD = 3
-TARGET_MAX_ATR = Decimal("6")
+TARGET_MAX_ATR = Decimal("8")
 FAR_SUPPORT_ATR = Decimal("2")
 MAX_POSITION_PCT = Decimal("25")
 MAX_DISASTER_LOSS_PCT = Decimal("2.5")
@@ -132,6 +132,11 @@ def to_cents(value: Decimal) -> Decimal:
 def r_multiple(target: Decimal, entry: Decimal, stop: Decimal) -> Decimal:
     """(target − entry) / (entry − stop), half-up to 2 dp."""
     return ((target - entry) / (entry - stop)).quantize(CENT, rounding=ROUND_HALF_UP)
+
+
+def atr_distance(price: Decimal, entry: Decimal, atr: Decimal) -> Decimal:
+    """(price − entry) / ATR, half-up to 2 dp — the target cap's yardstick."""
+    return ((price - entry) / atr).quantize(CENT, rounding=ROUND_HALF_UP)
 
 
 def money(value: Decimal) -> str:
@@ -325,7 +330,10 @@ def compute_plan(
         # lows can floor to one cent; neither is a distinct level
         if price <= e or (prices and price <= prices[-1][0]):
             continue
-        if price - e > cap:
+        # the distance in ATRs, quantized like R: a zone printed as "8.00
+        # ATR" is never dropped by a millionth (OPCH's 28.70 sat 4.7500 above
+        # a 23.95 entry against 7 × ATR = 4.749998)
+        if atr_distance(price, e, a) > TARGET_MAX_ATR:
             dropped.append(price)
             continue
         prices.append((price, detail))

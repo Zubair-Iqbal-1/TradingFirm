@@ -5,7 +5,7 @@ Part 4.3 / 4.8a — plan math v2. Every number below is hand-checked in spec
 Fixture: entry 50.00, ATR 1.20, account 25,000, risk 1 %.
   stop zone 47.80-48.10 → stop 46.60 (risk 3.40 = 2.83 ATR: far, but no
   alternative is given, so the zone stop stays), disaster 45.40.
-  Target cap 6 × 1.20 = 7.20 above entry → 57.20.
+  Target cap 8 × 1.20 = 9.60 above entry → 59.60.
   53.90 pays 3.90 / 3.40 = 1.15R → overhead; 56.90 pays 6.90 / 3.40 = 2.03R → T1.
   Size: risk 250 / 3.40 = 73, max position 6,250 / 50 = 125, cash 500,
   disaster loss 625 / 4.60 = 135 → 73 (risk). Loss at disaster
@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 
 from grading import plan_math
-from grading.plan_math import PlanMath, PlanRejected, Target, compute_plan, r_multiple, to_cents
+from grading.plan_math import PlanMath, PlanRejected, Target, atr_distance, compute_plan, r_multiple, to_cents
 
 
 def zone(low, high=None, **over):
@@ -229,13 +229,24 @@ def test_target_beyond_atr_cap_is_dropped():
 
 def test_all_targets_beyond_cap_is_no_target():
     r = plan(zones=[zone(47.80), zone(60.00), zone(70.00)])
-    assert r == PlanRejected("no_target", "every resistance above entry 50.0 is beyond 6xATR 7.20: 60.00, 70.00")
+    assert r == PlanRejected("no_target", "every resistance above entry 50.0 is beyond 8xATR 9.60: 60.00, 70.00")
 
 
 def test_target_cap_boundary_inclusive():
-    p = plan(zones=[zone(47.80), zone(57.20)])
-    assert prices(p.targets) == [57.20] and rs(p.targets) == [2.12]
-    assert plan(zones=[zone(47.80), zone(57.21)]).reason == "no_target"
+    # exactly 8 ATR (59.60) is kept; 59.61 is 8.01 ATR and dropped
+    p = plan(zones=[zone(47.80), zone(59.60)])
+    assert prices(p.targets) == [59.60] and rs(p.targets) == [2.82]
+    assert plan(zones=[zone(47.80), zone(59.61)]).reason == "no_target"
+    # the quantized boundary: OPCH's ATR. 29.38 sits 5.43 above 23.95, and
+    # 8 × 0.6785711560930524 = 5.428569 — a raw comparison drops it, but the
+    # distance is 8.0023 → 8.00 ATR, so it is kept; 29.39 is 8.02 and dropped
+    opch = dict(entry=23.95, atr=0.6785711560930524, zones=[zone(22.20, 22.29), zone(29.38)], ema20=23.8845)
+    p = compute_plan(account=25_000, risk_pct=1.0, **opch)
+    assert prices(p.targets) == [29.38]
+    opch["zones"] = [zone(22.20, 22.29), zone(29.39)]
+    assert compute_plan(account=25_000, risk_pct=1.0, **opch).reason == "no_target"
+    assert atr_distance(Decimal("29.38"), Decimal("23.95"), Decimal("0.6785711560930524")) == Decimal("8.00")
+    assert atr_distance(Decimal("28.70"), Decimal("23.95"), Decimal("0.6785711560930524")) == Decimal("7.00")
 
 
 # ── The far-support stop (decision 3) ─────────────────────────────────────
@@ -478,7 +489,7 @@ def test_zones_accept_a_tuple():
 def test_plan_math_version_is_two():
     """Rows before 4.8a are version 1 (NULL / absent). Bump on any rule change."""
     assert plan_math.PLAN_MATH_VERSION == 2
-    assert plan_math.TARGET_MAX_ATR == Decimal("6")
+    assert plan_math.TARGET_MAX_ATR == Decimal("8")
     assert plan_math.FAR_SUPPORT_ATR == Decimal("2")
     assert plan_math.MAX_DISASTER_LOSS_PCT == Decimal("2.5")
 
