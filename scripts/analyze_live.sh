@@ -44,7 +44,13 @@ print("verdict:", v["verdict"], "confidence:", v["confidence"])
 print("reasoning:", v["reasoning"])
 for name in ("thesis", "thesisBreakers", "riskFlags"):
     print(name + ":"); [print("  -", x) for x in v[name]]
-print("plan:", json.dumps(v["plan"], indent=2) if v["plan"] else d["planRejection"])
+# The account never reaches a transcript: sizeBasis carries it in dollars
+# (and sizeShares with the risk gives it back), so both are redacted here.
+plan = dict(v["plan"]) if v["plan"] else None
+if plan:
+    plan["sizeShares"] = "<redacted>"
+    plan["sizeBasis"] = "<redacted: bound + counts + dollars>"
+print("plan:", json.dumps(plan, indent=2) if plan else d["planRejection"])
 if d["usage"]:
     write = d["usage"].get("cacheWrite")
     print("cacheRead:", d["usage"].get("cacheRead"), "cacheWrite:", write, "->",
