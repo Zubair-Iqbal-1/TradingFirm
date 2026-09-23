@@ -1,51 +1,62 @@
 """
-TradingFirm — Plan math v2 (Part 4.3, rewritten in Part 4.8a).
+TradingFirm — Plan math v3 (Part 4.3, rewritten in 4.8a, extended in 4.8a-de).
 
-One pure function, `compute_plan`: entry + ATR + the dossier's zones (+ EMA20
-and, when a later part sends it, the last swing low) + account + risk
-percent → a long swing plan, or a named rejection.
+One pure function, `compute_plan`: entry + ATR + the dossier's zones (with
+their history) + EMA20 + the last swing low + account + risk percent → a
+long swing plan, or a named rejection.
 
-    stop zone = the support-side zone with the highest low: a zone's side
-                is data-engine's own label (`side`), the midpoint against
-                the entry only when a zone carries none         (4.8a-7)
-    stop      = stop zone low − 1×ATR                                 (D11)
-    far       = no stop zone, or entry − stop > 2×ATR: then the stop is the
-                highest of {stop zone stop, EMA20 − 1×ATR, swing low − 1×ATR}
-                whose raw level is ≤ entry and whose result is > 0   (4.8a-3)
-    disaster  = stop − 1×ATR                                          (D8)
-    candidates = resistance-side zone lows above entry (a zone straddling
-                the entry with its midpoint at or above it: its high),
-                floored to the cent, ascending; one whose distance in ATRs
-                (2 dp, half-up) exceeds 8 is dropped                 (4.8a-2)
-    T1        = the first candidate paying ≥ 1.5R; every candidate before it,
-                and every one inside a straddling zone, is `overhead` (the
-                nearest three are listed; the walk continues)        (4.8a-1)
-    targets   = T1 and the next two candidates
-    size      = min(risk sizing, cash cap, max position, disaster-loss cap)
+    components  every level input is floored to the cent BEFORE the
+                subtraction (ATR too), so each figure a basis string prints
+                is a component and the printed subtraction lands on the
+                level: stop = level_c − atr_c                     (4.8a-de-4)
+    stop zone   among the support-side zones whose stop leaves ≤ 2×ATR of
+                risk, the one that held most (ties: highest low); a zone's
+                side is data-engine's label (`side`), the midpoint only when
+                a zone carries none                          (4.8a-de-4, 4.8a-7)
+    far         no support zone within 2×ATR: the stop is the highest of
+                {the highest-low support zone's stop, EMA20 − 1×ATR,
+                swing low − 1×ATR} whose raw level is ≤ entry and whose
+                result is > 0                                        (4.8a-3)
+    extended    the chosen stop still leaves risk > 2×ATR: the plan is built
+                and flagged, with entryForMaxRisk = stop + 2×atr_c, the
+                highest entry at which the risk is 2 ATR            (4.8a-de-4)
+    disaster    = stop − atr_c                                            (D8)
+    candidates  resistance-side zone lows above entry (a straddling zone:
+                its high), floored, ascending; one whose distance in ATRs
+                (2 dp, half-up, exact ATR) exceeds 8 is dropped       (4.8a-2)
+    ceiling     the nearest candidate whose zone held ≥ 3 and held ≥ 3×broke
+                is where the walk stops: it is the last eligible candidate;
+                nothing above it is a target                        (4.8a-de-5)
+    T1          the first eligible candidate paying ≥ 1.5R; the ones before
+                it are `overhead` (three listed, the walk continues); no T1
+                under a ceiling → `ceiling`, none at all → `low_r` (4.8a-1)
+    targets     T1 and the next two eligible candidates
+    size        min(risk sizing, max position, cash cap, disaster-loss cap)
     lossAtDisasterPct = size × (entry − disaster) ÷ account, ≤ 2.5   (4.8a-8)
 
 Conventions (spec 4.3, kept):
   - Every input becomes Decimal(str(x)) BEFORE any arithmetic, and every
     subtraction, division and floor runs in Decimal. Only the final numbers
     go back to float.
-  - Zones are pooled (support + resistance, as data-engine sends them),
-    each tagged with its `side` by the analyst; a zone without one (an older
-    stored dossier) is split around the entry by its midpoint, data-engine's
-    own rule applied to the entry instead of the last close.
   - Prices floor to the cent; R rounds half-up to 2 dp, and the 1.5 test
-    uses the rounded R, so a printed "R 1.50" is never rejected.
+    uses the rounded R, so a printed "R 1.50" is never rejected. Ratios
+    (the 8-ATR cap, the 2-ATR tests) use the EXACT ATR: they are
+    comparisons, not printed levels.
   - Check order, first failure wins: arguments → ATR → stop (no_support)
-    → stop > 0 → disaster > 0 → targets (no_target) → T1 (low_r) → size.
+    → stop > 0 → disaster > 0 → targets (no_target) → ceiling → T1 (low_r)
+    → size.
   - Missing data (no ATR, no zones) is a PlanRejected; a caller bug or a
     broken zone contract is a ValueError.
   - Every level carries a plain-language `basis` naming the zone or rule it
-    came from, every number floored to the cent like the levels themselves
-    (verdict-units decision 6; one rounding, `to_cents`, for both).
+    came from, in cents. A zone with history prints touches / held / broke /
+    last and not its `tests` count (4.8a-de change 7).
+  - `size_basis` names bounds only: no count, no dollar figure, no percent
+    of the account (4.8a-de change 3). `size_shares` is the one count.
 
 `PLAN_MATH_VERSION` is stamped on every verdict (`ai.verdicts.plan_math_version`,
 `prompt_inputs.planMathVersion`) and joins the cache fingerprint. Rows
-before 4.8a (NULL / absent) are version 1. Bump it on any change to a rule
-above.
+before 4.8a (NULL / absent) are version 1, 4.8a's are 2. Bump it on any
+change to a rule above.
 
 Pure: standard library only (`test_plan_math_is_pure`). No config, no I/O.
 """
@@ -56,7 +67,7 @@ from dataclasses import dataclass
 from decimal import ROUND_FLOOR, ROUND_HALF_UP, Decimal
 from typing import Literal, Optional, Union
 
-PLAN_MATH_VERSION = 2
+PLAN_MATH_VERSION = 3
 
 STOP_ATR_MULT = Decimal("1")
 DISASTER_ATR_MULT = Decimal("1")
@@ -65,6 +76,8 @@ MAX_TARGETS = 3
 MAX_OVERHEAD = 3
 TARGET_MAX_ATR = Decimal("8")
 FAR_SUPPORT_ATR = Decimal("2")
+CEILING_MIN_HELD = 3
+CEILING_HELD_PER_BROKE = 3
 MAX_POSITION_PCT = Decimal("25")
 MAX_DISASTER_LOSS_PCT = Decimal("2.5")
 RISK_PCT_MAX = Decimal("10")
@@ -79,10 +92,17 @@ Reason = Literal[
     "stop_non_positive",
     "disaster_non_positive",
     "no_target",
+    "ceiling",
     "low_r",
     "size_zero",
 ]
 SizeBound = Literal["risk", "max position", "cash cap", "disaster loss"]
+BOUND_LABELS: dict[str, str] = {
+    "risk": "risk",
+    "max position": f"max position ≤ {MAX_POSITION_PCT} %",
+    "cash cap": "cash cap",
+    "disaster loss": f"disaster loss ≤ {MAX_DISASTER_LOSS_PCT} %",
+}
 
 
 @dataclass(frozen=True)
@@ -107,6 +127,8 @@ class PlanMath:
     size_bound: SizeBound
     size_basis: str
     loss_at_disaster_pct: float
+    extended: bool
+    entry_for_max_risk: Optional[float]
 
 
 @dataclass(frozen=True)
@@ -128,7 +150,8 @@ def to_decimal(value: object, name: str) -> Decimal:
 
 
 def to_cents(value: Decimal) -> Decimal:
-    """Floor to the cent — every stop, disaster line and target."""
+    """Floor to the cent — every level, and every component a level is
+    built from."""
     return value.quantize(CENT, rounding=ROUND_FLOOR)
 
 
@@ -138,17 +161,15 @@ def r_multiple(target: Decimal, entry: Decimal, stop: Decimal) -> Decimal:
 
 
 def atr_distance(price: Decimal, entry: Decimal, atr: Decimal) -> Decimal:
-    """(price − entry) / ATR, half-up to 2 dp — the target cap's yardstick."""
+    """(price − entry) / ATR, half-up to 2 dp — the yardstick of the target
+    cap, the 2-ATR support test and the extension test (exact ATR)."""
     return ((price - entry) / atr).quantize(CENT, rounding=ROUND_HALF_UP)
 
 
 def money(value: Decimal) -> str:
     """A price, an ATR or a ratio for a basis string: floored to the cent,
-    the SAME rounding as every plan level (`to_cents`), so a target prints
-    the very figure its zone low prints (T1 49.38 ↔ "resistance 49.38-…",
-    never "49.39-…"). Display only; the arithmetic stays exact. A printed
-    subtraction of two floored figures can still sit one cent above the
-    floored exact difference; the level printed first is the plan's."""
+    the SAME rounding as every plan level (`to_cents`). Since v3 every level
+    is built from floored components, a printed `a - b` equals its level."""
     return f"{to_cents(value)}"
 
 
@@ -176,6 +197,8 @@ class _Zone:
     mid: Decimal
     detail: str
     side: Optional[str]
+    held: Optional[int]
+    broke: Optional[int]
 
     def is_support(self, entry: Decimal) -> bool:
         """data-engine's label when the zone carries one; else the midpoint."""
@@ -183,29 +206,41 @@ class _Zone:
             return self.side == "support"
         return self.mid < entry
 
+    def is_ceiling(self) -> bool:
+        """held ≥ 3 and held ≥ 3 × broke (4.8a-de decision 5). A zone without
+        history is never a ceiling."""
+        if self.held is None:
+            return False
+        broke = self.broke or 0
+        return self.held >= CEILING_MIN_HELD and self.held >= CEILING_HELD_PER_BROKE * broke
+
 
 def _count(value: object) -> Optional[int]:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
 
 
 def _zone_detail(zone: Mapping) -> str:
-    """The zone's own facts for a basis string: tests, then the history
-    fields 4.8a-de will send (`held`, `broke`, `lastTouch`, carried through
-    untouched and used by no rule here: the ceiling rule is plan math v3),
-    volume node, score. Every key is optional (plan math needs low and high
-    only); a missing or malformed field is simply not printed."""
+    """The zone's own facts for a basis string. With history (4.8a-de):
+    touches, held, broke, last; without it (an older dossier): the swing
+    count. Then volume node and score. Every key is optional (plan math
+    needs low and high only); a malformed field is simply not printed."""
     parts = []
-    tests = _count(zone.get("tests"))
-    if tests:
-        parts.append(f"{tests} test{'s' if tests != 1 else ''}")
     held, broke = _count(zone.get("held")), _count(zone.get("broke"))
-    if held is not None:
-        parts.append(f"held {held}")
-    if broke is not None:
-        parts.append(f"broke {broke}")
-    last = zone.get("lastTouch")
-    if isinstance(last, str) and last.strip():
-        parts.append(f"last {last.strip()}")
+    if held is not None or broke is not None:
+        touches = _count(zone.get("touches"))
+        if touches is not None:
+            parts.append(f"touches {touches}")
+        if held is not None:
+            parts.append(f"held {held}")
+        if broke is not None:
+            parts.append(f"broke {broke}")
+        last = zone.get("lastTouch")
+        if isinstance(last, str) and last.strip():
+            parts.append(f"last {last.strip()}")
+    else:
+        tests = _count(zone.get("tests"))
+        if tests:
+            parts.append(f"{tests} test{'s' if tests != 1 else ''}")
     if zone.get("volumeNode") is True or zone.get("volume_node") is True:
         parts.append("volume node")
     score = zone.get("score")
@@ -215,8 +250,8 @@ def _zone_detail(zone: Mapping) -> str:
 
 
 def _zones(zones: Sequence[Mapping]) -> list[_Zone]:
-    """(low, high, midpoint, detail) per zone; a broken zone is a data-engine
-    contract break."""
+    """(low, high, midpoint, detail, side, held, broke) per zone; a broken
+    zone is a data-engine contract break."""
     out = []
     for i, zone in enumerate(zones):
         if not isinstance(zone, Mapping) or "low" not in zone or "high" not in zone:
@@ -228,7 +263,8 @@ def _zones(zones: Sequence[Mapping]) -> list[_Zone]:
         side = zone.get("side")
         if side is not None and side not in SIDES:
             raise ValueError(f"zone {i} side {side!r} is not one of {SIDES}")
-        out.append(_Zone(low, high, (low + high) / TWO, _zone_detail(zone), side))
+        out.append(_Zone(low, high, (low + high) / TWO, _zone_detail(zone), side,
+                         _count(zone.get("held")), _count(zone.get("broke"))))
     return out
 
 
@@ -277,11 +313,13 @@ def compute_plan(
 
     `zones` is data-engine's support + resistance lists pooled; each item
     needs `low` and `high`, carries `side` ("support" / "resistance", the
-    list it came from; absent = classify by midpoint), and `tests`,
-    `volumeNode`, `score` feed the basis text; other keys are ignored. `risk_pct` is a percent: 1.0 means 1 % of
-    `account`. `ema20` and `swing_low` are the stop alternatives for a name
-    whose support is far below (None = not available); `swing_low_date`
-    only names the swing low in the basis text.
+    list it came from; absent = classify by midpoint), `held` / `broke`
+    (the stop preference and the ceiling read them; absent = no history),
+    and `touches`, `lastTouch`, `tests`, `volumeNode`, `score` feed the
+    basis text; other keys are ignored. `risk_pct` is a percent: 1.0 means
+    1 % of `account`. `ema20` and `swing_low` are the far-branch stop
+    alternatives (None = not available); `swing_low_date` only names the
+    swing low in the basis text.
     """
     # 1. arguments
     e = _positive(entry, "entry")
@@ -295,36 +333,48 @@ def compute_plan(
     if swing_low_date is not None and not isinstance(swing_low_date, str):
         raise ValueError("swing_low_date must be a string or None")
 
-    # 2. ATR
+    # 2. ATR: exact for ratios, floored as a level component
     a = _atr(atr)
     if a is None:
         return PlanRejected("no_atr", f"atr {atr!r} is not a positive number")
+    a_c = to_cents(a)
+    buffer = STOP_ATR_MULT * a_c
 
-    # 3. the stop: the support side is data-engine's label, or the midpoint
-    #    below the entry when a zone has none
+    def level_stop(level: Decimal) -> Decimal:
+        """A stop from a level: both components floored first."""
+        return to_cents(level) - buffer
+
+    def risk_atr(stop_: Decimal) -> Decimal:
+        return atr_distance(e, stop_, a)
+
+    # 3. the stop
     support = [z for z in pool if z.is_support(e)]
     resistance = [z for z in pool if not z.is_support(e)]
-    stop_zone = max(support, key=lambda z: z.low) if support else None
+    eligible = [(z, level_stop(z.low)) for z in support if risk_atr(level_stop(z.low)) <= FAR_SUPPORT_ATR]
     candidates: list[tuple[Decimal, str]] = []
-    far_note: str
-    if stop_zone is not None:
-        zone_stop = to_cents(stop_zone.low - STOP_ATR_MULT * a)
-        zone_risk = e - zone_stop
-        far = zone_risk > FAR_SUPPORT_ATR * a
-        candidates.append((zone_stop, f"{_describe('support', stop_zone)}, low {money(stop_zone.low)}"
-                                      f" - {STOP_ATR_MULT}xATR {money(a)}"))
-        far_note = (f"support {money(stop_zone.low)}-{money(stop_zone.high)} gives risk "
-                    f"{money(zone_risk)} = {_ratio(zone_risk / a)} ATR (> {FAR_SUPPORT_ATR} ATR)")
+    if eligible:
+        z, zone_stop = max(eligible, key=lambda pair: (pair[0].held or 0, pair[0].low))
+        rule = f"{_describe('support', z)}, low {money(z.low)} - {STOP_ATR_MULT}xATR {money(a)}"
+        if len(eligible) > 1:
+            rule += f"; most held of {len(eligible)} support zones within {FAR_SUPPORT_ATR} ATR"
+        candidates.append((zone_stop, rule))
     else:
-        far = True
-        far_note = f"no support zone below entry {money(e)}"
-    if far:
+        if support:
+            nearest = max(support, key=lambda z: z.low)
+            zone_stop = level_stop(nearest.low)
+            zone_risk = e - zone_stop
+            far_note = (f"nearest support {money(nearest.low)}-{money(nearest.high)} gives risk "
+                        f"{money(zone_risk)} = {_ratio(zone_risk / a)} ATR (> {FAR_SUPPORT_ATR} ATR)")
+            candidates.append((zone_stop, f"{_describe('support', nearest)}, low {money(nearest.low)}"
+                                          f" - {STOP_ATR_MULT}xATR {money(a)}"))
+        else:
+            far_note = f"no support zone below entry {money(e)}"
         if ema is not None and ema <= e:
-            alt = to_cents(ema - STOP_ATR_MULT * a)
+            alt = level_stop(ema)
             if alt > 0:
                 candidates.append((alt, f"EMA20 {money(ema)} - {STOP_ATR_MULT}xATR {money(a)}; {far_note}"))
         if swing is not None and swing <= e:
-            alt = to_cents(swing - STOP_ATR_MULT * a)
+            alt = level_stop(swing)
             if alt > 0:
                 when = f" ({swing_low_date})" if swing_low_date else ""
                 candidates.append((alt, f"swing low{when} {money(swing)} - {STOP_ATR_MULT}xATR {money(a)}; {far_note}"))
@@ -333,35 +383,46 @@ def compute_plan(
                                           f"and no EMA20 / swing low at or below it")
     stop, stop_rule = max(candidates, key=lambda c: c[0])
 
-    # 4. stop > 0 (only the support-zone stop can be ≤ 0: alternatives were filtered)
+    # 4. stop > 0 (only a support-zone stop can be ≤ 0: alternatives were filtered)
     if stop <= 0:
         return PlanRejected("stop_non_positive", f"stop {stop} from {stop_rule}")
 
-    # 5. disaster line, from the rounded stop so the printed numbers subtract
-    disaster = to_cents(stop - DISASTER_ATR_MULT * a)
+    # 5. disaster line: the same floored buffer, so the printed numbers subtract
+    disaster = stop - DISASTER_ATR_MULT * a_c
     if disaster <= 0:
-        return PlanRejected("disaster_non_positive", f"disaster {disaster} from stop {stop} - ATR {a}")
+        return PlanRejected("disaster_non_positive", f"disaster {disaster} from stop {stop} - ATR {a_c}")
 
-    # 6. target candidates: resistance-side zone lows above entry; a zone
+    # 6. extension: the stop that won still leaves more than 2 ATR of risk
+    per_share = e - stop
+    risk_in_atr = risk_atr(stop)
+    extended = risk_in_atr > FAR_SUPPORT_ATR
+    entry_for_max_risk: Optional[Decimal] = None
+    if extended:
+        entry_for_max_risk = stop + FAR_SUPPORT_ATR * a_c
+        stop_rule += (f"; extended: risk {money(per_share)} = {risk_in_atr} ATR (> {FAR_SUPPORT_ATR} ATR), "
+                      f"entry for {FAR_SUPPORT_ATR} ATR risk {money(entry_for_max_risk)} = "
+                      f"stop {money(stop)} + {FAR_SUPPORT_ATR}xATR {money(a)}")
+
+    # 7. target candidates: resistance-side zone lows above entry; a zone
     #    straddling the entry offers its high, and everything up to that
     #    high is overhead whatever it pays
-    raw: list[tuple[Decimal, str]] = []
+    raw: list[tuple[Decimal, str, _Zone]] = []
     straddle_high: Optional[Decimal] = None
     for z in resistance:
         if z.low > e:
-            raw.append((to_cents(z.low), _describe("resistance", z)))
+            raw.append((to_cents(z.low), _describe("resistance", z), z))
         else:
             top = to_cents(z.high)
-            raw.append((top, f"zone high, {_describe('resistance', z)} straddles entry {money(e)}"))
+            raw.append((top, f"zone high, {_describe('resistance', z)} straddles entry {money(e)}", z))
             straddle_high = top if straddle_high is None else max(straddle_high, top)
     raw.sort(key=lambda c: c[0])
     if not raw:
         return PlanRejected("no_target", f"no resistance above entry {e}")
 
     cap = TARGET_MAX_ATR * a
-    prices: list[tuple[Decimal, str]] = []
+    prices: list[tuple[Decimal, str, _Zone]] = []
     dropped: list[Decimal] = []
-    for price, detail in raw:
+    for price, detail, z in raw:
         # the floor can land on the entry (low 50.004, entry 50.00), and two
         # lows can floor to one cent; neither is a distinct level
         if price <= e or (prices and price <= prices[-1][0]):
@@ -372,21 +433,31 @@ def compute_plan(
         if atr_distance(price, e, a) > TARGET_MAX_ATR:
             dropped.append(price)
             continue
-        prices.append((price, detail))
+        prices.append((price, detail, z))
     if not prices:
         if dropped:
             return PlanRejected("no_target", f"every resistance above entry {e} is beyond "
                                              f"{TARGET_MAX_ATR}xATR {money(cap)}: {', '.join(money(p) for p in dropped)}")
         return PlanRejected("no_target", f"no resistance above entry {e}")
 
-    # 7. T1 = the first candidate paying >= 1.5R; the ones before it are overhead
+    # 8. the ceiling: the nearest well-held zone ends the eligible list
+    ceiling: Optional[tuple[Decimal, str, _Zone]] = None
+    for i, (price, detail, z) in enumerate(prices):
+        if z.is_ceiling():
+            ceiling = (price, detail, z)
+            prices = prices[: i + 1]
+            break
+
+    # 9. T1 = the first eligible candidate paying >= 1.5R; the ones before it are overhead
     overhead: list[Target] = []
     targets: list[Target] = []
     best_seen = Decimal("0")
-    for price, detail in prices:
+    for price, detail, z in prices:
         r = r_multiple(price, e, stop)
         best_seen = max(best_seen, r)
         inside = straddle_high is not None and price <= straddle_high
+        if ceiling is not None and price == ceiling[0]:
+            detail = f"{detail}, ceiling"
         if not targets and (r < MIN_BEST_R or inside):
             if len(overhead) < MAX_OVERHEAD:
                 overhead.append(Target(float(price), float(r), f"overhead {price}: {detail}"))
@@ -394,14 +465,16 @@ def compute_plan(
         if len(targets) < MAX_TARGETS:
             targets.append(Target(float(price), float(r), f"T{len(targets) + 1} {price}: {detail}"))
     if not targets:
+        if ceiling is not None:
+            return PlanRejected("ceiling", f"{_describe('resistance', ceiling[2])} caps the trade at "
+                                           f"{r_multiple(ceiling[0], e, stop)}R")
         if best_seen >= MIN_BEST_R:
             return PlanRejected("low_r", f"no target outside the zone straddling entry {e} "
                                          f"(best R {best_seen} is inside it)")
         return PlanRejected("low_r", f"no resistance pays >= {MIN_BEST_R}R: best R {best_seen}")
     best = max(Decimal(str(t.r)) for t in targets)
 
-    # 8. size: the smallest of four bounds, ties in this order
-    per_share = e - stop
+    # 10. size: the smallest of four bounds, ties in this order
     per_share_disaster = e - disaster
     budget = acct * pct / HUNDRED
     bounds: list[tuple[SizeBound, int]] = [
@@ -416,7 +489,7 @@ def compute_plan(
         return PlanRejected("size_zero", f"size 0 ({bound}): budget {money(budget)}, risk/share {money(per_share)}")
     loss_pct = (Decimal(size) * per_share_disaster / acct * HUNDRED).quantize(CENT, rounding=ROUND_HALF_UP)
 
-    sizing = ", ".join(f"{name} {n}" for name, n in bounds)
+    others = ", ".join(BOUND_LABELS[name] for name, _ in bounds if name != bound)
     return PlanMath(
         entry=float(e),
         stop=float(stop),
@@ -429,7 +502,8 @@ def compute_plan(
         risk_budget=float(budget),
         size_shares=size,
         size_bound=bound,
-        size_basis=(f"{bound}: {size} shares ({sizing}; risk {pct}% of {money(acct)} = {money(budget)}, "
-                    f"{money(per_share)}/share; loss at disaster {loss_pct}% of account, cap {MAX_DISASTER_LOSS_PCT}%)"),
+        size_basis=f"size: {BOUND_LABELS[bound]}-bound ({others} not binding)",
         loss_at_disaster_pct=float(loss_pct),
+        extended=extended,
+        entry_for_max_risk=None if entry_for_max_risk is None else float(entry_for_max_risk),
     )
