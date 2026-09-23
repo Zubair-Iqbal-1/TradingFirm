@@ -348,6 +348,23 @@ def test_level_basis_names_zone():
     assert p.stop_basis == "stop 46.60: support 47.80-48.10, low 47.80 - 1xATR 1.20"
 
 
+def test_zone_history_fields_pass_through():
+    """held / broke / lastTouch (4.8a-de) reach the basis text untouched and
+    decide nothing here; absent or malformed, they are not printed."""
+    zones = [zone(47.80, 48.10, tests=4, held=4, broke=1, lastTouch="2026-09-02", score=65),
+             zone(56.90, 57.30, tests=3, held=3, broke=0, lastTouch="2026-08-12", volumeNode=True, score=85)]
+    p = plan(zones=zones)
+    assert p.targets[0].basis == "T1 56.90: resistance 56.90-57.30, 3 tests, held 3, broke 0, last 2026-08-12, volume node, score 85"
+    assert p.stop_basis == "stop 46.60: support 47.80-48.10, 4 tests, held 4, broke 1, last 2026-09-02, score 65, low 47.80 - 1xATR 1.20"
+    # the same levels, R and size as without them: no rule reads them
+    bare = plan(zones=[zone(47.80, 48.10, tests=4, score=65), zone(56.90, 57.30, tests=3, volumeNode=True, score=85)])
+    assert (p.stop, p.disaster_line, prices(p.targets), rs(p.targets), p.size_shares) == \
+        (bare.stop, bare.disaster_line, prices(bare.targets), rs(bare.targets), bare.size_shares)
+    # malformed → not printed, never a raise
+    p = plan(zones=[zone(47.80), zone(56.90, held=None, broke="2", lastTouch=" ", tests=True)])
+    assert p.targets[0].basis == "T1 56.90: resistance 56.90-56.90, score 50"
+
+
 def test_basis_text_is_in_cents():
     p = plan(atr=1.2047, zones=[zone(47.803, 48.10), zone(56.90, 57.00)])
     assert p.stop_basis == "stop 46.59: support 47.80-48.10, 2 tests, score 50, low 47.80 - 1xATR 1.20"

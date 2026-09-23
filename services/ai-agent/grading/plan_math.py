@@ -179,13 +179,28 @@ class _Zone:
         return self.mid < entry
 
 
+def _count(value: object) -> Optional[int]:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
 def _zone_detail(zone: Mapping) -> str:
-    """The zone's own facts for a basis string: tests, volume node, score.
-    Every key is optional (plan math needs low and high only)."""
+    """The zone's own facts for a basis string: tests, then the history
+    fields 4.8a-de will send (`held`, `broke`, `lastTouch`, carried through
+    untouched and used by no rule here: the ceiling rule is plan math v3),
+    volume node, score. Every key is optional (plan math needs low and high
+    only); a missing or malformed field is simply not printed."""
     parts = []
-    tests = zone.get("tests")
-    if isinstance(tests, int) and not isinstance(tests, bool) and tests > 0:
+    tests = _count(zone.get("tests"))
+    if tests:
         parts.append(f"{tests} test{'s' if tests != 1 else ''}")
+    held, broke = _count(zone.get("held")), _count(zone.get("broke"))
+    if held is not None:
+        parts.append(f"held {held}")
+    if broke is not None:
+        parts.append(f"broke {broke}")
+    last = zone.get("lastTouch")
+    if isinstance(last, str) and last.strip():
+        parts.append(f"last {last.strip()}")
     if zone.get("volumeNode") is True or zone.get("volume_node") is True:
         parts.append("volume node")
     score = zone.get("score")
