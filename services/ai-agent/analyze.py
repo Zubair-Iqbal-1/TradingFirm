@@ -48,7 +48,7 @@ MAX_RECOMMENDATIONS = 2
 # so a cached verdict built on an older document is never served, and it is
 # stored inside prompt_inputs as `projectionVersion` (absent = 1), so a
 # reader of ai.verdicts knows which key set a row follows.
-PROJECTION_VERSION = 3
+PROJECTION_VERSION = 4
 
 # The indicator keys the model reads, data-engine's name -> the projected
 # name. An allowlist, never a pass-through: a key data-engine adds later is
@@ -70,13 +70,18 @@ INDICATOR_KEYS = {
     "avgDollarVolume20": "avgDollarVolume20Usd",
     "gapPct": "gapPct",
     "sector": "sector", "zones": "zones", "benchmarks": "benchmarks",
+    # 4.8a-de: the newest fractal swing low, {price, date}; plan math's
+    # far-branch stop candidate, so the model reads what the basis names
+    "lastSwingLow": "lastSwingLow",
 }
 UNIT_SUFFIXES = ("Atr", "Pct", "Frac", "Usd", "UsdM")
 # Numbers the model reads without a suffix: prices in dollars, and the
 # conventional keys the legend in prompts/verdict.md names one by one.
 PRICE_LEVEL_KEYS = frozenset({"close", "ema20", "ema50", "ema200", "low", "high", "price"})
 CONVENTIONAL_KEYS = frozenset({"rvol", "rsi14", "macd", "macdSignal", "macdHist",
-                               "score", "tests", "bars"})
+                               "score", "tests", "bars",
+                               # 4.8a-de: a zone's history, counts of episodes
+                               "touches", "held", "broke"})
 
 
 class VerdictRejected(Exception):
@@ -194,6 +199,10 @@ def plan_view(plan: Union[PlanMath, PlanRejected]) -> tuple[Optional[dict], Opti
         "overhead": [{"price": t.price, "r": t.r, "basis": t.basis} for t in plan.overhead],
         "bestR": plan.best_r,
         "riskPerShare": plan.risk_per_share,
+        # 4.8a-de: the stop leaves > 2 ATR of risk at this entry; the level
+        # to wait for is plan math's, never the model's
+        "extended": plan.extended,
+        "entryForMaxRisk": plan.entry_for_max_risk,
     }, None
 
 
@@ -294,14 +303,16 @@ def prompt_sha(system: str) -> str:
     return hashlib.sha256(system.encode("utf-8")).hexdigest()[:16]
 
 
-def llm_schema(has_plan: bool) -> dict:
+def llm_schema(has_plan: bool, extended: bool = False) -> dict:
     """The strict structured-output schema, derived from models.verdict:
     every field required, no extras, and **no price, R or size anywhere**.
     Without a plan the enum has no `go` and the three plan fields are gone,
-    so rule 3 of the prompt is enforced by the decoder, not by hope."""
+    so rule 3 of the prompt is enforced by the decoder, not by hope. An
+    extended plan (4.8a-de) keeps its fields but loses `go` the same way."""
     text = {"type": "string"}
+    can_go = has_plan and not extended
     properties: dict[str, Any] = {
-        "verdict": {"type": "string", "enum": ["go", "wait", "avoid"] if has_plan else ["wait", "avoid"]},
+        "verdict": {"type": "string", "enum": ["go", "wait", "avoid"] if can_go else ["wait", "avoid"]},
         "confidence": {"type": "integer"},
         "reasoning": text,
         "thesis": {"type": "array", "items": text},
@@ -430,12 +441,16 @@ def merge(answer: dict, plan: Union[PlanMath, PlanRejected], earnings_in_days: O
             "sizeShares": plan.size_shares,
             "sizeBasis": plan.size_basis,
             "lossAtDisasterPct": plan.loss_at_disaster_pct,
+            "extended": plan.extended,
+            "entryForMaxRisk": plan.entry_for_max_risk,
             "earningsInDays": earnings_in_days,
             "holdThroughEarnings": answer.get("holdThroughEarnings"),
             "horizonDays": answer.get("horizonDays"),
         }
         if not isinstance(plan_json["holdThroughEarnings"], bool):
             raise VerdictRejected("holdThroughEarnings is not a boolean")
+        if plan.extended and answer.get("verdict") == "go":
+            raise VerdictRejected("go on an extended plan")
     else:
         if answer.get("verdict") == "go":
             raise VerdictRejected("go without a plan")

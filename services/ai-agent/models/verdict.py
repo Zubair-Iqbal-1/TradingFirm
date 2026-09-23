@@ -66,6 +66,11 @@ class Plan(BaseModel):
     size_basis: Basis = Field(alias="sizeBasis")
     # 4.8a: size × (entry − disaster) ÷ account, capped at 2.5 % by plan math.
     loss_at_disaster_pct: Optional[float] = Field(default=None, ge=0, alias="lossAtDisasterPct")
+    # 4.8a-de: the stop leaves more than 2 ATR of risk at this entry;
+    # entryForMaxRisk is the highest entry at which the risk is 2 ATR (plan
+    # math's number). Both optional on read: rows before 4.8a-de have neither.
+    extended: bool = False
+    entry_for_max_risk: Optional[float] = Field(default=None, gt=0, alias="entryForMaxRisk")
     earnings_in_days: Optional[int] = Field(default=None, ge=0, alias="earningsInDays")
     hold_through_earnings: bool = Field(default=False, alias="holdThroughEarnings")
     horizon_days: int = Field(ge=1, le=HORIZON_DAYS_MAX, alias="horizonDays")
@@ -78,6 +83,8 @@ class Plan(BaseModel):
                   + [t.price for t in self.targets])
         if any(lo >= hi for lo, hi in zip(levels, levels[1:])):
             raise ValueError("levels must ascend: disasterLine < stop < entry < overhead < targets")
+        if self.entry_for_max_risk is not None and not self.stop < self.entry_for_max_risk < self.entry:
+            raise ValueError("entryForMaxRisk must sit between the stop and the entry")
         return self
 
 

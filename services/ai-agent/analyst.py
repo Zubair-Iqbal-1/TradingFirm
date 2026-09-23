@@ -250,7 +250,8 @@ async def run(state, settings, ticker: str, horizon: str, entry: Optional[float]
         # 11. the verdict call ────────────────────────────────────
         try:
             result = await provider.complete_structured(
-                system, analyze.user_prompt(inputs), analyze.llm_schema(has_plan),
+                system, analyze.user_prompt(inputs),
+                analyze.llm_schema(has_plan, extended=has_plan and plan.extended),
                 label=analyze.LABEL, model=settings.llm_model,
                 cache_system=settings.llm_verdict_cache,
             )

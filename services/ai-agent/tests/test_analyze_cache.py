@@ -166,7 +166,7 @@ def test_store_failure_returns_verdict_unstored(app, caplog):
     out = resp.json()
 
     assert resp.status_code == 200
-    assert out["stored"] is False and out["verdictId"] is None and out["verdict"]["verdict"] == "go"
+    assert out["stored"] is False and out["verdictId"] is None and out["verdict"]["verdict"] == "wait"
     assert not any("verdict:" in k for k in state.redis.store), "never cache what has no row"
     assert state.redis.store[f"tf:ai:state:ledger_missed:{cache.et_day()}"] == "1"
 

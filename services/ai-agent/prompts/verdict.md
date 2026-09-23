@@ -19,8 +19,9 @@ One JSON document between two `<data-…>` tags, holding:
   multiple of ATR14 (`ext20Atr` 1.3 means 1.3 ATRs above the 20 EMA, not a
   percent), `Pct` is percent, `Frac` is a 0–1 fraction, `Usd` is dollars,
   `UsdM` is millions of dollars; `rsi14` and every `score` are 0–100, `rvol`
-  is a ratio, `macd*` are in dollars, and every other bare number is a
-  price in dollars.
+  is a ratio, `macd*` are in dollars, a zone's `touches`, `held` and `broke`
+  are counts of times price reached the level and held or closed through
+  it, and every other bare number is a price in dollars.
 - `events` — recent news for the ticker, already grouped so that one story
   reported by several outlets is one line. `sources` is how many outlets
   carried it, `relevance` and `sentiment` (-1 to 1) come from a separate
@@ -39,7 +40,10 @@ One JSON document between two `<data-…>` tags, holding:
   multiples, and `overhead`: resistance between the entry and the first
   target that pays under 1.5R, or sits in a zone the entry is inside — it
   must be cleared before the first target, and it is not a target. Every
-  level carries a `basis` naming the zone or rule it came from. Or
+  level carries a `basis` naming the zone or rule it came from. `extended:
+  true` means the nearest valid stop leaves more than 2 ATR of risk at this
+  entry; `entryForMaxRisk` is the highest entry at which the risk is 2 ATR.
+  Say `wait` and name that level as the entry to wait for. Or
   `plan: null` with a `planRejection` saying why no plan could be built.
 - `dataQuality` — which sections were missing, stale, truncated or errored.
   `truncated` means the section was cut at its cap (30 headlines, 10

@@ -114,7 +114,9 @@ class Provider:
             raise self.raises
         data = self.verdict
         if data is GO and "go" not in schema["properties"]["verdict"]["enum"]:
-            data = WAIT                     # what strict decoding would force
+            # what strict decoding would force: no plan → the wait shape; an
+            # extended plan (4.8a-de) keeps its plan fields but loses `go`
+            data = {**GO, "verdict": "wait"} if "invalidation" in schema["properties"] else WAIT
         return LLMResult(data=data, model=MODEL, finish_reason="stop", duration_ms=9,
                          usage={"input": 6100, "output": 900, "reasoning": 300,
                                 "cacheWrite": 1400, "cost": 0.0212}, host="Anthropic")
@@ -204,6 +206,10 @@ def test_analyze_returns_stores_and_ledgers_a_verdict(app):
     assert plan["targets"] == [{"price": 56.9, "r": 2.03, "basis": "T1 56.90: resistance 56.90-57.30"}]
     assert plan["overhead"] == [{"price": 53.9, "r": 1.15, "basis": "overhead 53.90: resistance 53.90-54.30"}]
     assert plan["lossAtDisasterPct"] == 1.34
+    # the fixture's stop is 2.83 ATR away (4.8a-de): extended, so the decoder
+    # dropped `go` and the fake provider answered `wait` with the plan
+    assert plan["extended"] is True and plan["entryForMaxRisk"] == 49.0
+    assert out["verdict"]["verdict"] == "wait"
     assert plan["earningsInDays"] is not None and plan["invalidation"] == GO["invalidation"]
     assert out["regime"] == "CAUTIOUS" and out["macroStatus"] == "ok" and out["planRejection"] is None
 
@@ -211,7 +217,8 @@ def test_analyze_returns_stores_and_ledgers_a_verdict(app):
     assert row["entry"] == Decimal("50.00") and row["entry_source"] == "last_close"
     assert json.loads(row["dossier"])["ticker"] == "AAPL", "the full dossier snapshot"
     assert json.loads(row["prompt_inputs"])["plan"]["stop"] == 46.6
-    assert json.loads(row["prompt_inputs"])["planMathVersion"] == 2 == row["plan_math_version"]
+    assert json.loads(row["prompt_inputs"])["planMathVersion"] == 3 == row["plan_math_version"]
+    assert json.loads(row["plan_proposed"])["entryForMaxRisk"] == 49.0
     assert json.loads(row["plan_proposed"])["overhead"][0]["price"] == 53.9
     assert row["macro_brief_id"] is None and row["regime"] == "CAUTIOUS"
     assert state.db_pool.tx_open == 1

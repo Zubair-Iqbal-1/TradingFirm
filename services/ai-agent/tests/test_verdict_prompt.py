@@ -21,8 +21,16 @@ ZONES = [{"low": 45.00, "high": 45.40}, {"low": 47.80, "high": 48.10},
 
 
 def plan_a():
-    """Spec 4.8a's worked example A: 53.90 is overhead (1.15R), T1 56.90 (2.03R)."""
+    """Spec 4.8a's worked example A: 53.90 is overhead (1.15R), T1 56.90
+    (2.03R); under v3 (4.8a-de) its 2.83-ATR stop makes it `extended`
+    (entryForMaxRisk 49.00), so a `go` on it is refused."""
     return compute_plan(entry=50.00, atr=1.20, zones=ZONES, account=25000, risk_pct=1.0)
+
+
+def plan_near():
+    """The same zones with a support zone within 2 ATR: not extended, `go` allowed."""
+    return compute_plan(entry=50.00, atr=1.20, zones=[{"low": 49.00, "high": 49.10}] + ZONES[2:],
+                        account=25000, risk_pct=1.0)
 
 
 def dossier(news=None, close=50.0012207):
@@ -34,7 +42,8 @@ def dossier(news=None, close=50.0012207):
                            "close": close, "atr14": 1.2000000001, "ema20": 49.1, "ext20": 0.751,
                            "pos52w": 0.62, "avgDollarVolume20": 1.5e9, "rsSpy5": 1.23,
                            "gaps20": [1, 2, 3], "computedAt": "x", "cached": True, "bars": 250,
-                           "zones": {"support": ZONES[:2], "resistance": ZONES[2:]}},
+                           "zones": {"support": ZONES[:2], "resistance": ZONES[2:]},
+                           "lastSwingLow": {"price": 47.9, "date": "2026-09-10"}},
             "news": {"status": "truncated", "items": news or []},
             "events": {"status": "ok", "items": [
                 {"type": "earnings", "at": "2026-07-30T00:00:00Z", "meta": {}},
@@ -51,7 +60,9 @@ def dossier(news=None, close=50.0012207):
 
 
 MACRO = {"status": "ok", "regime": "CAUTIOUS", "score": 66, "brief": None, "briefId": None}
-ANSWER = {"verdict": "go", "confidence": 62, "reasoning": "Because.",
+# `wait`: plan_a() is extended under v3, and the decoder never offers `go`
+# on an extended plan (test_merge_refuses_go_on_extended_plan has both cases)
+ANSWER = {"verdict": "wait", "confidence": 62, "reasoning": "Because.",
           "thesis": ["a", "b", "c"], "thesisBreakers": ["x"], "riskFlags": ["earnings in 38 days"],
           "invalidation": "daily close below the 20 EMA", "holdThroughEarnings": False,
           "horizonDays": 10}
@@ -96,8 +107,9 @@ def test_next_earnings_ignores_the_past_and_other_events():
 def test_projection_is_trimmed_rounded_and_carries_no_account():
     doc = inputs()
     ind = doc["indicators"]
-    assert doc["projectionVersion"] == analyze.PROJECTION_VERSION == 3
-    assert doc["planMathVersion"] == 2
+    assert doc["projectionVersion"] == analyze.PROJECTION_VERSION == 4
+    assert doc["planMathVersion"] == 3
+    assert ind["lastSwingLow"] == {"price": 47.9, "date": "2026-09-10"}
     assert ind["close"] == 50.0012 and ind["atr14Usd"] == 1.2 and "atr14" not in ind
     assert ind["ext20Atr"] == 0.751 and ind["pos52wFrac"] == 0.62 and ind["rsSpy5Pct"] == 1.23
     assert ind["avgDollarVolume20Usd"] == 1.5e9 and ind["aboveEma20Pct"] == 1.84
@@ -112,7 +124,8 @@ def test_projection_is_trimmed_rounded_and_carries_no_account():
     assert doc["plan"] == {"entry": 50.0, "stop": 46.6, "stopBasis": doc["plan"]["stopBasis"],
                            "disasterLine": 45.4, "bestR": 2.03, "riskPerShare": 3.4,
                            "targets": [{"price": 56.9, "r": 2.03, "basis": "T1 56.90: resistance 56.90-57.30"}],
-                           "overhead": [{"price": 53.9, "r": 1.15, "basis": "overhead 53.90: resistance 53.90-54.30"}]}
+                           "overhead": [{"price": 53.9, "r": 1.15, "basis": "overhead 53.90: resistance 53.90-54.30"}],
+                           "extended": True, "entryForMaxRisk": 49.0}
     text = json.dumps(doc)
     assert "25000" not in text and "sizeShares" not in text and "riskBudget" not in text
     assert "lossAtDisaster" not in text, "a percent of the account is still about the account"
@@ -131,6 +144,45 @@ def test_plan_view_carries_overhead():
     assert merged["lossAtDisasterPct"] == 1.34
     for has_plan in (True, False):
         assert "overhead" not in analyze.llm_schema(has_plan)["properties"]
+
+
+def test_plan_view_carries_extension():
+    """4.8a-de: the flag and the level to wait for reach the model and the
+    stored plan; never the LLM schema."""
+    view, _ = analyze.plan_view(plan_a())
+    assert view["extended"] is True and view["entryForMaxRisk"] == 49.0
+    view, _ = analyze.plan_view(plan_near())
+    assert view["extended"] is False and view["entryForMaxRisk"] is None
+    merged = analyze.merge(ANSWER, plan_a(), 38).model_dump(by_alias=True)["plan"]
+    assert merged["extended"] is True and merged["entryForMaxRisk"] == 49.0
+    for has_plan in (True, False):
+        for extended in (True, False):
+            assert not {"extended", "entryForMaxRisk"} & set(analyze.llm_schema(has_plan, extended)["properties"])
+
+
+def test_llm_schema_drops_go_when_extended():
+    assert analyze.llm_schema(True, extended=False)["properties"]["verdict"]["enum"] == ["go", "wait", "avoid"]
+    extended = analyze.llm_schema(True, extended=True)
+    assert extended["properties"]["verdict"]["enum"] == ["wait", "avoid"]
+    assert "invalidation" in extended["properties"], "the plan fields stay: only go is gone"
+    assert analyze.llm_schema(False, extended=True)["properties"]["verdict"]["enum"] == ["wait", "avoid"]
+
+
+def test_merge_refuses_go_on_extended_plan():
+    go = {**ANSWER, "verdict": "go"}
+    with pytest.raises(analyze.VerdictRejected, match="go on an extended plan"):
+        analyze.merge(go, plan_a(), 38)
+    assert analyze.merge(go, plan_near(), 38).verdict == "go"
+    assert analyze.merge(ANSWER, plan_a(), 38).verdict == "wait"
+
+
+def test_prompt_names_extension_legend():
+    text = prompts.load(prompts.VERDICT)
+    for phrase in ("`extended:\n  true` means the nearest valid stop leaves more than 2 ATR of risk",
+                   "`entryForMaxRisk` is the highest entry at which the risk is 2 ATR",
+                   "Say `wait` and name that level as the entry to wait for",
+                   "a zone's `touches`, `held` and `broke`\n  are counts"):
+        assert phrase in text, phrase
 
 
 def test_projection_marks_an_unclassified_news_section():
@@ -192,7 +244,7 @@ def test_every_projected_number_carries_its_unit():
         assert (key.endswith(analyze.UNIT_SUFFIXES) or key in analyze.PRICE_LEVEL_KEYS
                 or key in analyze.CONVENTIONAL_KEYS), f"{key}={value} carries no unit"
     # The static half: the allowlist's own targets, values or not.
-    containers = {"sector", "zones", "benchmarks"}
+    containers = {"sector", "zones", "benchmarks", "lastSwingLow"}
     for target in analyze.INDICATOR_KEYS.values():
         assert (target in containers or target.endswith(analyze.UNIT_SUFFIXES)
                 or target in analyze.PRICE_LEVEL_KEYS or target in analyze.CONVENTIONAL_KEYS), target
@@ -249,7 +301,11 @@ def test_projection_version_is_pinned():
     paths = _key_paths(inputs())
     digest = hashlib.sha256(json.dumps(paths).encode()).hexdigest()[:16]
     # 3: 4.8a added planMathVersion, plan.overhead and plan.*.basis (56 → 58 paths)
-    assert (analyze.PROJECTION_VERSION, len(paths), digest) == (3, 58, "b9ecad26d8cc780c")
+    # 4: 4.8a-de added indicators.lastSwingLow.{price,date} and plan.extended /
+    #    plan.entryForMaxRisk (58 → 62; a dict key is a path only through its
+    #    children, so `indicators/lastSwingLow` itself is not one)
+    assert (analyze.PROJECTION_VERSION, len(paths), digest) == (4, 62, "6c1a999470313ea3")
+    assert "/indicators/lastSwingLow/price" in paths and "/indicators/lastSwingLow" not in paths
 
 
 def test_projection_version_bump_changes_the_fingerprint(monkeypatch):
@@ -265,8 +321,8 @@ def test_projection_version_bump_changes_the_fingerprint(monkeypatch):
 DATA_ENGINE_INDICATOR_FIELDS = [
     "ticker", "asOf", "bars", "close", "sector", "ema20", "ema50", "ema200", "atr14", "rvol",
     "rsi14", "macd", "macdSignal", "macdHist", "pos52w", "ext20", "ext50", "rsSpy5", "rsSpy20",
-    "rsSector5", "rsSector20", "avgDollarVolume20", "gapPct", "gaps20", "zones", "benchmarks",
-    "computedAt", "cached",
+    "rsSector5", "rsSector20", "avgDollarVolume20", "gapPct", "gaps20", "zones", "lastSwingLow",
+    "benchmarks", "computedAt", "cached",
 ]
 DROPPED_INDICATOR_FIELDS = {"ticker", "asOf", "bars", "gaps20", "computedAt", "cached"}
 
@@ -360,7 +416,7 @@ def test_verdict_prompt_ships_and_states_the_rules():
 
 # ── Merge ────────────────────────────────────────────────────────
 
-@pytest.mark.parametrize("reason", ["no_atr", "no_support", "no_target", "low_r",
+@pytest.mark.parametrize("reason", ["no_atr", "no_support", "no_target", "ceiling", "low_r",
                                     "stop_non_positive", "disaster_non_positive", "size_zero"])
 def test_plan_rejection_passes_through_as_wait_reason(reason):
     """Incl. the ATH gap (`no_target`): no synthetic target, the rejection is

@@ -21,8 +21,10 @@ def plan_json(**over):
         "targets": [{"price": 56.9, "r": 2.03, "basis": "T1 56.90: resistance 56.90-57.30"}],
         "overhead": [{"price": 53.9, "r": 1.15, "basis": "overhead 53.90: resistance 53.90-54.30"}],
         "lossAtDisasterPct": 1.34,
+        "extended": False,
+        "entryForMaxRisk": None,
         "sizeShares": 73,
-        "sizeBasis": "risk: 1% of 25000 = 250 / 3.40 per share",
+        "sizeBasis": "size: risk-bound (max position ≤ 25 %, cash cap, disaster loss ≤ 2.5 % not binding)",
         "earningsInDays": 12,
         "holdThroughEarnings": False,
         "horizonDays": 10,
@@ -210,10 +212,30 @@ def test_plan_overhead_bounds(over):
         Plan.model_validate(plan_json(**over))
 
 
+@pytest.mark.parametrize("over", [
+    pytest.param({"extended": True, "entryForMaxRisk": 46.6}, id="at_stop"),
+    pytest.param({"extended": True, "entryForMaxRisk": 50.0}, id="at_entry"),
+    pytest.param({"extended": True, "entryForMaxRisk": 51.0}, id="above_entry"),
+    pytest.param({"extended": True, "entryForMaxRisk": 0}, id="zero"),
+    pytest.param({"extended": False, "entryForMaxRisk": 51.0}, id="level_without_flag_is_still_bounded"),
+])
+def test_plan_extension_bounds(over):
+    with pytest.raises(ValidationError):
+        Plan.model_validate(plan_json(**over))
+
+
+def test_plan_extension_accepted():
+    p = Plan.model_validate(plan_json(extended=True, entryForMaxRisk=49.0))
+    assert p.extended is True and p.entry_for_max_risk == 49.0
+    assert p.model_dump(by_alias=True)["entryForMaxRisk"] == 49.0
+
+
 def test_plan_before_4_8a_still_parses():
-    """Rows stored by v1 plan math have no overhead, basis or loss field."""
+    """Rows stored by v1 plan math have no overhead, basis or loss field;
+    rows before 4.8a-de have no extended / entryForMaxRisk."""
     body = plan_json()
-    del body["overhead"], body["lossAtDisasterPct"]
+    del body["overhead"], body["lossAtDisasterPct"], body["extended"], body["entryForMaxRisk"]
     body["targets"] = [{"price": 53.9, "r": 1.15}, {"price": 57.5, "r": 2.21}]
     p = Plan.model_validate(body)
     assert p.overhead == [] and p.loss_at_disaster_pct is None and p.targets[0].basis is None
+    assert p.extended is False and p.entry_for_max_risk is None
