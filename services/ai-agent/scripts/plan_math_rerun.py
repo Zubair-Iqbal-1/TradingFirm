@@ -94,7 +94,8 @@ def summarize(result, entry: float, atr) -> dict:
                 "extended": None}
     risk = Decimal(str(entry)) - Decimal(str(result.stop))
     t1 = result.targets[0]
-    ceiling = any(t.basis.endswith("ceiling") for t in result.targets)
+    # the ceiling target's own price: it may be T2 or T3, not T1
+    ceiling = next((f"{t.price:.2f}" for t in result.targets if t.basis.endswith("ceiling")), None)
     extended = getattr(result, "extended", False)
     return {
         "valid": True, "reason": None,
@@ -103,7 +104,7 @@ def summarize(result, entry: float, atr) -> dict:
         "stopRule": _stop_rule(result.stop_basis),
         "t1": f"{t1.price:.2f} ({t1.r:.2f}R)",
         "overhead": len(getattr(result, "overhead", ()) or ()),
-        "ceiling": f"{t1.price:.2f}" if ceiling else None,
+        "ceiling": ceiling,
         "extended": f"yes, wait for <= {getattr(result, 'entry_for_max_risk'):.2f}" if extended else "no",
     }
 
