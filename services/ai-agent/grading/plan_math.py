@@ -39,7 +39,8 @@ Conventions (spec 4.3, kept):
   - Missing data (no ATR, no zones) is a PlanRejected; a caller bug or a
     broken zone contract is a ValueError.
   - Every level carries a plain-language `basis` naming the zone or rule it
-    came from, all numbers in cents, ATR to 2 dp (verdict-units decision 6).
+    came from, every number floored to the cent like the levels themselves
+    (verdict-units decision 6; one rounding, `to_cents`, for both).
 
 `PLAN_MATH_VERSION` is stamped on every verdict (`ai.verdicts.plan_math_version`,
 `prompt_inputs.planMathVersion`) and joins the cache fingerprint. Rows
@@ -142,13 +143,17 @@ def atr_distance(price: Decimal, entry: Decimal, atr: Decimal) -> Decimal:
 
 
 def money(value: Decimal) -> str:
-    """A price or an ATR for a basis string: 2 dp, half-up (display only —
-    the plan's own levels are already floored to the cent)."""
-    return f"{value.quantize(CENT, rounding=ROUND_HALF_UP)}"
+    """A price, an ATR or a ratio for a basis string: floored to the cent,
+    the SAME rounding as every plan level (`to_cents`), so a target prints
+    the very figure its zone low prints (T1 49.38 ↔ "resistance 49.38-…",
+    never "49.39-…"). Display only; the arithmetic stays exact. A printed
+    subtraction of two floored figures can still sit one cent above the
+    floored exact difference; the level printed first is the plan's."""
+    return f"{to_cents(value)}"
 
 
 def _ratio(value: Decimal) -> str:
-    return f"{value.quantize(CENT, rounding=ROUND_HALF_UP)}"
+    return money(value)
 
 
 # ── Checks ────────────────────────────────────────────────────────────────

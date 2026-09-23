@@ -365,6 +365,27 @@ def test_zone_history_fields_pass_through():
     assert p.targets[0].basis == "T1 56.90: resistance 56.90-56.90, score 50"
 
 
+def test_level_and_basis_share_rounding():
+    """One rounding — floor to the cent — for a level and for the text that
+    names its zone. OUST live 2026-09-23: the 49.389999 zone low printed as
+    T1 49.38 but its basis said 49.39-49.50 under a half-up text rounding."""
+    zones = [zone(32.970001220703125, 33.08000183105469), zone(40.4900016784668, 40.599998474121094),
+             zone(48.25, 48.380001068115234), zone(49.38999938964844, 49.5)]
+    p = plan(entry=40.25, atr=2.0208, zones=zones, ema20=36.596, account=25_000, risk_pct=1.0)
+    t1 = p.targets[0]
+    assert t1.price == 49.38 and t1.basis.startswith("T1 49.38: resistance 49.38-49.50")
+    for level in p.targets + p.overhead:
+        low = level.basis.split(": resistance ")[1].split("-")[0]
+        assert f"{level.price:.2f}" == low, level.basis
+    # the stop: the level is the floor of the exact difference; the printed
+    # components are floored too, and here they subtract to the same cent
+    assert p.stop == 34.57
+    assert p.stop_basis.startswith("stop 34.57: EMA20 36.59 - 1xATR 2.02;")
+    # a zone low that floors down and rounds up prints the floored figure everywhere
+    p = plan(zones=[zone(47.80), zone(56.909, 57.309)])
+    assert p.targets[0].price == 56.90 and p.targets[0].basis == "T1 56.90: resistance 56.90-57.30, 2 tests, score 50"
+
+
 def test_basis_text_is_in_cents():
     p = plan(atr=1.2047, zones=[zone(47.803, 48.10), zone(56.90, 57.00)])
     assert p.stop_basis == "stop 46.59: support 47.80-48.10, 2 tests, score 50, low 47.80 - 1xATR 1.20"
