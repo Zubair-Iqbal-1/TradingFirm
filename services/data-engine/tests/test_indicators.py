@@ -463,11 +463,11 @@ def test_swing_snapshot_last_values_match_package_functions():
     assert snap["rvol"] > 0
 
 
-def test_swing_snapshot_zones_use_window():
-    # 8 leading bars far below, then the 17-bar test_levels series. With
-    # window 17 the zones must equal support_resistance() on those 17 bars
-    # alone (default 1.6 parameters); the leading bars change the volume
-    # bins and must be excluded.
+def test_zones_use_full_history_not_52_weeks():
+    # 4.8a-de decision 1: 8 leading bars far below the 17-bar test_levels
+    # series. The zones now come from the FULL frame, whatever `window_52w`
+    # says, so the leading bars' swing lows are levels too; before this part
+    # the snapshot cut the frame to the window first.
     lead = 8
     high = [50.0 + i for i in range(lead)] + [103, 102, 101.5, 103, 105, 110, 106, 103, 102, 103, 104, 106, 108, 107, 103, 104, 106]
     low = [48.0 + i for i in range(lead)] + [101, 100.5, 100, 100.8, 102, 106, 101, 99, 95, 98, 100, 102, 104, 100.5, 99.6, 101, 103]
@@ -475,15 +475,45 @@ def test_swing_snapshot_zones_use_window():
     volume = [1.0] * lead + [1] * 13 + [100] + [1] * 3
     df = _frame(close, high=high, low=low, volume=volume)
 
-    tail = df.tail(17)
-    expected = support_resistance(tail["High"], tail["Low"], tail["Close"], tail["Volume"])
+    full = support_resistance(df["High"], df["Low"], df["Close"], df["Volume"])
     snap = swing_snapshot(df, window_52w=17)
     for side in ("support", "resistance"):
-        assert snap["zones"][side] == [zone_to_dict(z) for z in expected[side]]
-    assert snap["zones"]["support"]  # the known pivots produce zones
+        assert snap["zones"][side] == [zone_to_dict(z) for z in full[side]]
+    assert snap["zones"]["support"]
 
-    full = support_resistance(df["High"], df["Low"], df["Close"], df["Volume"])
-    assert [z.price for z in full["support"]] != [z.price for z in expected["support"]]
+    tail = df.tail(17)
+    windowed = support_resistance(tail["High"], tail["Low"], tail["Close"], tail["Volume"])
+    assert [z.price for z in full["support"]] != [z.price for z in windowed["support"]]
+    # every zone carries its history and a dated last touch
+    for z in snap["zones"]["support"] + snap["zones"]["resistance"]:
+        assert {"touches", "held", "broke", "last_touch"} <= set(z)
+        assert z["touches"] >= z["held"] + z["broke"]
+        assert z["last_touch"] is None or z["last_touch"].startswith("2026-01-")
+
+
+def test_pos_52w_still_uses_252_bars():
+    from indicators.snapshot import WINDOW_52W
+    assert WINDOW_52W == 252
+    # 300 bars: a spike to 200 at bar 10 is outside the 252-bar window, so
+    # pos_52w ignores it (the zones read the full frame: the test above)
+    close = [100.0 + (i % 7) for i in range(300)]
+    high = [c + 1 for c in close]
+    low = [c - 1 for c in close]
+    high[10], close[10] = 200.0, 199.0
+    df = _frame(close, high=high, low=low)
+    snap = swing_snapshot(df)
+    assert snap["pos_52w"] == pytest.approx(check_52w_position(df["Close"].tail(252)))
+    assert snap["pos_52w"] < 1.0
+
+
+def test_swing_snapshot_last_swing_low():
+    # the 17-bar series on a daily index: swing lows at 2, 8 and 14 (99.6)
+    high = [103, 102, 101.5, 103, 105, 110, 106, 103, 102, 103, 104, 106, 108, 107, 103, 104, 106]
+    low = [101, 100.5, 100, 100.8, 102, 106, 101, 99, 95, 98, 100, 102, 104, 100.5, 99.6, 101, 103]
+    close = [102, 101, 100.5, 102, 104, 108, 102, 100, 96, 101, 103, 104, 106, 107, 100, 103, 105]
+    df = _frame(close, high=high, low=low)
+    assert swing_snapshot(df)["last_swing_low"] == {"price": 99.6, "date": "2026-01-15"}
+    assert swing_snapshot(df.head(4))["last_swing_low"] is None
 
 
 def test_zone_to_dict_shape():
@@ -491,6 +521,7 @@ def test_zone_to_dict_shape():
     assert zone_to_dict(z) == {
         "low": 1.0, "high": 2.0, "price": 1.5, "score": 25, "methods": ["swing_low"],
         "tests": 1, "recent": False, "volume_node": True,
+        "touches": 0, "held": 0, "broke": 0, "last_touch": None,
     }
 
 
@@ -512,4 +543,5 @@ def test_swing_snapshot_empty_returns_nulls():
         assert snap["rvol"] == 0.0
         assert snap["gaps20"] == []
         assert snap["zones"] == {"support": [], "resistance": []}
+        assert snap["last_swing_low"] is None
         assert all(snap[k] is None for k in ("ema20", "atr14", "rsi14", "macd", "pos_52w", "rs_spy_5"))

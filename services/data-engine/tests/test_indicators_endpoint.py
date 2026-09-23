@@ -126,7 +126,10 @@ async def test_indicators_returns_full_set(full_pool):
     assert len(body["gaps20"]) == 20
     assert body["zones"]["support"] and body["zones"]["resistance"]
     assert set(body["zones"]["support"][0]) == {"low", "high", "price", "score", "methods",
-                                                "tests", "recent", "volumeNode"}
+                                                "tests", "recent", "volumeNode",
+                                                "touches", "held", "broke", "lastTouch"}
+    assert body["lastSwingLow"] == expected_json["lastSwingLow"]
+    assert set(body["lastSwingLow"]) == {"price", "date"}
 
 
 @pytest.mark.asyncio
@@ -141,9 +144,81 @@ async def test_indicators_camelcase_keys(full_pool):
         "ema20", "ema50", "ema200", "atr14", "rvol", "rsi14",
         "macd", "macdSignal", "macdHist", "pos52w", "ext20", "ext50",
         "rsSpy5", "rsSpy20", "rsSector5", "rsSector20", "avgDollarVolume20",
-        "gapPct", "gaps20", "zones", "benchmarks", "computedAt", "cached",
+        "gapPct", "gaps20", "zones", "lastSwingLow", "benchmarks", "computedAt", "cached",
     }
     assert not any("_" in k for k in body)
+
+
+@pytest.mark.asyncio
+async def test_last_swing_low_in_response(full_pool):
+    """4.8a-de decision 3: the newest fractal swing low of the fixture, its
+    date being the bar's own date (midnight UTC storage, no conversion)."""
+    pool, _conn, bars = full_pool
+    main.app.state.db_pool = pool
+    body = TestClient(main.app).get("/indicators/AAPL").json()
+    df = await _fixture_df("AAPL")
+    from indicators import last_swing_low
+    pivot = last_swing_low(df["High"], df["Low"])
+    assert body["lastSwingLow"] == {"price": pivot.price, "date": df.index[pivot.index].date().isoformat()}
+    assert body["lastSwingLow"]["date"] <= body["asOf"][:10]
+    assert any(z["touches"] > 0 for z in body["zones"]["support"] + body["zones"]["resistance"])
+
+
+@pytest.mark.asyncio
+async def test_cached_pre_part_body_still_validates(full_pool):
+    """A body cached before 4.8a-de (no lastSwingLow, no zone history) is
+    still served, with the defaults, until its TTL: fail-open, no recompute."""
+    pool, conn, _bars = full_pool
+    main.app.state.db_pool = pool
+    redis = FakeRedis()
+    main.app.state.redis = redis
+    fresh = await main.get_indicators("AAPL")
+    old_body = fresh.model_dump(mode="json", by_alias=True, exclude={"cached", "last_swing_low"})
+    for side in ("support", "resistance"):
+        for z in old_body["zones"][side]:
+            for key in ("touches", "held", "broke", "lastTouch"):
+                del z[key]
+    import json
+    await redis.set(indicators_key("AAPL"), json.dumps(old_body), ex=900)
+    reads = conn.fetch.await_count
+    served = await main.get_indicators("AAPL")
+    assert served.cached is True and conn.fetch.await_count == reads
+    assert served.last_swing_low is None
+    assert served.zones.support[0].touches == 0 and served.zones.support[0].last_touch is None
+
+
+def test_snapshot_from_bars_script():
+    """scripts/snapshot_from_bars.py (4.8a-de decision 8): stored bar rows in,
+    the camelCase snapshot out, bars after `asOf` dropped, the stored close
+    checked; a malformed row is marked, never a raise."""
+    import io
+    import json
+    from scripts import snapshot_from_bars as script
+
+    n = 30
+    bars = [{"ts": f"2026-01-{i + 1:02d}T00:00:00+00:00", "open": 100.0 + i, "high": 101.0 + i,
+             "low": 99.0 + i, "close": 100.5 + i, "volume": 1000} for i in range(n)]
+    rows = [
+        {"ticker": "AAA", "asOf": "2026-01-20", "storedClose": 119.5, "bars": bars},
+        {"ticker": "BBB", "asOf": "2026-01-20", "storedClose": 100.0, "bars": bars},   # mismatch
+        {"ticker": "CCC", "bars": "junk"},
+    ]
+    out = io.StringIO()
+    assert script.main(io.StringIO(json.dumps(rows)), out) == 0
+    result = json.loads(out.getvalue())
+    assert [r["ticker"] for r in result] == ["AAA", "BBB", "CCC"]
+    aaa = result[0]
+    assert aaa["error"] is None and aaa["closeMismatch"] is False
+    assert aaa["indicators"]["bars"] == 20 and aaa["indicators"]["close"] == 119.5
+    assert aaa["indicators"]["asOf"].startswith("2026-01-20")
+    assert "lastSwingLow" in aaa["indicators"] and "zones" in aaa["indicators"]
+    assert not any("_" in k for k in aaa["indicators"])
+    assert result[1]["closeMismatch"] is True
+    assert result[2]["error"] and result[2]["indicators"] is None
+    # never a fixture, never a provider: pure arithmetic on the rows given
+    import inspect
+    src = inspect.getsource(script)
+    assert "from providers" not in src and "import providers" not in src and "asyncpg" not in src
 
 
 # ── Failure branches: closed ──────────────────────────────────────────────
@@ -382,8 +457,8 @@ async def test_refresh_invalidates_indicators_cache(full_pool):
 AI_AGENT_INDICATOR_FIELDS = [
     "ticker", "asOf", "bars", "close", "sector", "ema20", "ema50", "ema200", "atr14", "rvol",
     "rsi14", "macd", "macdSignal", "macdHist", "pos52w", "ext20", "ext50", "rsSpy5", "rsSpy20",
-    "rsSector5", "rsSector20", "avgDollarVolume20", "gapPct", "gaps20", "zones", "benchmarks",
-    "computedAt", "cached",
+    "rsSector5", "rsSector20", "avgDollarVolume20", "gapPct", "gaps20", "zones", "lastSwingLow",
+    "benchmarks", "computedAt", "cached",
 ]
 
 

@@ -22,7 +22,10 @@ of the series the named function returns, over the full stored history:
     rs_spy_5 / rs_spy_20     relative_strength(close, spy, 5|20)
     rs_sector_5 / _20        relative_strength(close, sector, 5|20)
     pos_52w                  check_52w_position(close over the last `window_52w` bars)
-    zones                    support_resistance(...) over the last `window_52w` bars
+    zones                    support_resistance(...) over the FULL stored history
+                             (Part 4.8a-de; 52 weeks before it), each zone with
+                             its touches / held / broke / last_touch
+    last_swing_low           last_swing_low(high, low): {price, date} or None
 
 Conventions:
   - Undefined is None (every NaN becomes None). No minimum bar count; a
@@ -39,7 +42,7 @@ from typing import Any
 
 import pandas as pd
 
-from indicators.levels import Zone, support_resistance
+from indicators.levels import Zone, last_swing_low, support_resistance
 from indicators.momentum import check_52w_position, macd, relative_strength, rsi
 from indicators.moving_averages import ema
 from indicators.volatility import calc_atr, extension, gap
@@ -74,6 +77,10 @@ def zone_to_dict(zone: Zone) -> dict:
         "tests": zone.tests,
         "recent": zone.recent,
         "volume_node": zone.volume_node,
+        "touches": zone.touches,
+        "held": zone.held,
+        "broke": zone.broke,
+        "last_touch": zone.last_touch,
     }
 
 
@@ -94,6 +101,7 @@ def _empty_snapshot() -> dict:
         "gap_pct": None,
         "gaps20": [],
         "zones": {"support": [], "resistance": []},
+        "last_swing_low": None,
     }
 
 
@@ -136,12 +144,15 @@ def swing_snapshot(
     gaps = gap(open_, close)
 
     window = daily.tail(window_52w)
-    zones = support_resistance(
-        window["High"].astype(float),
-        window["Low"].astype(float),
-        window["Close"].astype(float),
-        window["Volume"].astype(float),
-    )
+    # Zones and the swing low read the full stored history (4.8a-de decision
+    # 1): a level from 18 months ago is still a level. pos_52w keeps its window.
+    zones = support_resistance(high, low, close, volume)
+    swing = last_swing_low(high, low)
+    swing_out = None
+    if swing is not None:
+        when = daily.index[swing.index]
+        swing_out = {"price": swing.price,
+                     "date": when.date().isoformat() if hasattr(when, "date") else str(when)}
 
     return {
         "bars": int(len(daily)),
@@ -169,4 +180,5 @@ def swing_snapshot(
             "support": [zone_to_dict(z) for z in zones["support"]],
             "resistance": [zone_to_dict(z) for z in zones["resistance"]],
         },
+        "last_swing_low": swing_out,
     }

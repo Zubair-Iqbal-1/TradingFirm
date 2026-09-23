@@ -866,10 +866,17 @@ def test_dossier_camelcase_shape(_no_network, app_state):
     assert body["sections"]["earnings"]["dataQuality"] == {
         "source": None, "dropped": 0, "disagreements": 0}
     assert body["sections"]["indicators"]["computedAt"]
+    # 4.8a-de: the swing low and the zone history ride the dossier too. The
+    # fixture bars walk up monotonically, so there is no fractal low (null)
+    # and the only zones are volume nodes.
+    indicators = body["sections"]["indicators"]
+    assert "lastSwingLow" in indicators and indicators["lastSwingLow"] is None
+    zones = indicators["zones"]["support"] + indicators["zones"]["resistance"]
+    assert zones and all({"touches", "held", "broke", "lastTouch"} <= set(z) for z in zones)
     # No snake_case anywhere in the document.
     flat = json.dumps(body)
     for snake in ("last_bar_date", "stale_weekdays", "data_quality", "upstream_calls",
-                  "published_at", "filed_on", "market_cap"):
+                  "published_at", "filed_on", "market_cap", "last_swing_low", "last_touch"):
         assert snake not in flat
 
 
