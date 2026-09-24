@@ -24,7 +24,9 @@ of the series the named function returns, over the full stored history:
     pos_52w                  check_52w_position(close over the last `window_52w` bars)
     zones                    support_resistance(...) over the FULL stored history
                              (Part 4.8a-de; 52 weeks before it), each zone with
-                             its touches / held / broke / last_touch
+                             its touches / held / broke / last_touch and the
+                             side split (held_below … broke_above); ATR-width
+                             merge and the windowed nearest-6 selection (2026-09-24)
     last_swing_low           last_swing_low(high, low): {price, date} or None
 
 Conventions:
@@ -81,6 +83,10 @@ def zone_to_dict(zone: Zone) -> dict:
         "held": zone.held,
         "broke": zone.broke,
         "last_touch": zone.last_touch,
+        "held_below": zone.held_below,
+        "broke_below": zone.broke_below,
+        "held_above": zone.held_above,
+        "broke_above": zone.broke_above,
     }
 
 

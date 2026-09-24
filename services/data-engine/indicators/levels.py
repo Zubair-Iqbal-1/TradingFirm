@@ -18,7 +18,10 @@ Conventions (docs/decisions.md, Part 1.6):
     comparison semantics.
   - Volume nodes bin each bar's volume by its close over [min low, max high];
     bars with NaN close or NaN volume are skipped.
-  - Merge anchor is the running mean of the group, inclusive of merge_pct.
+  - Merge (Part 4.8a-de review, 2026-09-24): a level joins the current group
+    only while the merged band stays <= `merge_atr` x ATR14 wide (0.5); the
+    0.5 % running-mean rule remains the fallback when there is no ATR
+    (fewer than 15 bars).
   - "methods" are swing_high / swing_low only; a volume node is reported
     separately (Zone.volume_node) and scores +25 but is not a method.
   - "tests" = number of swing members in a zone; "recent" = newest swing
@@ -26,10 +29,17 @@ Conventions (docs/decisions.md, Part 1.6):
     included).
   - Support / resistance split on zone price vs last valid close;
     zone price == close is resistance.
+  - Selection (2026-09-24): inside the window [close - 2.5 ATR, close + 8 ATR]
+    the nearest `per_side` (6) zones a side, nearest first — a support zone
+    is inside when its high is, a resistance zone when its low is; a side
+    with fewer than `min_side` (3) inside is filled from outside, nearest
+    first. No ATR: no window, the nearest `per_side`.
   - Zone history (Part 4.8a-de, spec decision 2): `touches`, `held`,
-    `broke`, `last_touch` per returned zone, over the full series, counted
-    across both approach sides (a rejection from above counts as held
-    like one from below; docs/decisions.md 2026-09-23).
+    `broke`, `last_touch` per returned zone, over the full series, plus the
+    side split (2026-09-24): `held_below` / `broke_below` count approaches
+    from below (the level tested as resistance), `held_above` /
+    `broke_above` approaches from above (tested as support); the totals are
+    their sums.
 """
 
 from dataclasses import dataclass
@@ -38,12 +48,20 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
+from indicators.volatility import calc_atr
+
 Level = tuple[float, str, int | None]
 
 SWING_HIGH = "swing_high"
 SWING_LOW = "swing_low"
 VOLUME = "volume"
 HOLD_BARS = 3
+ATR_PERIOD = 14
+MERGE_ATR = 0.5
+WINDOW_BELOW_ATR = 2.5
+WINDOW_ABOVE_ATR = 8.0
+PER_SIDE = 6
+MIN_SIDE = 3
 
 
 @dataclass(frozen=True)
@@ -62,6 +80,10 @@ class Zone:
     held: int = 0
     broke: int = 0
     last_touch: Optional[str] = None
+    held_below: int = 0
+    broke_below: int = 0
+    held_above: int = 0
+    broke_above: int = 0
 
 
 @dataclass(frozen=True)
@@ -70,6 +92,10 @@ class ZoneHistory:
     held: int
     broke: int
     last_index: Optional[int]      # positional index of the newest episode's last bar
+    held_below: int = 0            # approaches from below: the level tested as resistance
+    broke_below: int = 0
+    held_above: int = 0            # approaches from above: tested as support
+    broke_above: int = 0
 
 
 @dataclass(frozen=True)
@@ -172,11 +198,14 @@ def zone_history(
                             series ends before completing)
 
     A bar with a NaN high, low or close never reaches or jumps, ends an
-    episode, and its close is not a valid close. Counts are side-agnostic:
-    held includes rejections from above as well as from below.
+    episode, and its close is not a valid close. The totals are
+    side-agnostic; the split (`held_below` / `broke_below` for approaches
+    from below, `held_above` / `broke_above` from above) is what the
+    ceiling and the stop preference read (2026-09-24).
 
-    Returns ZoneHistory(touches, held, broke, last_index) with last_index
-    the positional index of the newest episode's last bar (None if none).
+    Returns ZoneHistory(touches, held, broke, last_index, held_below,
+    broke_below, held_above, broke_above) with last_index the positional
+    index of the newest episode's last bar (None if none).
     """
     if not len(high) == len(low) == len(close):
         raise ValueError("high, low and close must have the same length")
@@ -200,7 +229,8 @@ def zone_history(
             return 1
         return 0
 
-    touches = held = broke = 0
+    touches = 0
+    counts = {"held": {-1: 0, 1: 0}, "broke": {-1: 0, 1: 0}}   # by approach side
     last_index: Optional[int] = None
     last_outside = 0          # side of the last valid close outside the band
     last_episode_end = -2     # index of the last episode's final bar
@@ -232,8 +262,8 @@ def zone_history(
                 touches += 1
                 last_index = end
                 result = outcome(start, end, last_outside)
-                held += result == "held"
-                broke += result == "broke"
+                if result in counts:
+                    counts[result][last_outside] += 1
             for j in range(start, end + 1):
                 last_outside = side(j) or last_outside
             last_episode_end = end
@@ -242,12 +272,15 @@ def zone_history(
             if (s != 0 and last_outside != 0 and s == -last_outside
                     and i != last_episode_end + 1):
                 touches += 1
-                broke += 1
+                counts["broke"][last_outside] += 1
                 last_index = i
                 last_episode_end = i
             last_outside = s or last_outside
         i += 1
-    return ZoneHistory(touches, held, broke, last_index)
+    held_b, held_a = counts["held"][-1], counts["held"][1]
+    broke_b, broke_a = counts["broke"][-1], counts["broke"][1]
+    return ZoneHistory(touches, held_b + held_a, broke_b + broke_a, last_index,
+                       held_b, broke_b, held_a, broke_a)
 
 
 # ── Stage 1b: volume nodes ────────────────────────────────────────────────
@@ -307,11 +340,20 @@ def volume_nodes(
 # ── Stage 2: merge ────────────────────────────────────────────────────────
 
 
-def merge_levels(levels: list[Level], merge_pct: float = 0.5) -> list[list[Level]]:
+def merge_levels(
+    levels: list[Level],
+    merge_pct: float = 0.5,
+    max_width: Optional[float] = None,
+) -> list[list[Level]]:
     """
-    Group levels whose price sits within `merge_pct` percent of the group's
-    running mean. Levels are visited in ascending price order; a level that
-    does not fit the current group starts a new one.
+    Group levels in ascending price order; a level that does not fit the
+    current group starts a new one.
+
+    With `max_width` (2026-09-24: 0.5 x ATR14), a level joins only while the
+    merged band — the group's highest price minus its lowest — stays
+    <= max_width, so bands never chain wider than that. Without it (no ATR),
+    a level fits when it sits within `merge_pct` percent of the group's
+    running mean, the Part 1.6 rule.
 
     Returns:
         Groups in ascending price order; each group in ascending price order.
@@ -321,11 +363,14 @@ def merge_levels(levels: list[Level], merge_pct: float = 0.5) -> list[list[Level
     for level in sorted(levels, key=lambda lv: lv[0]):
         price = level[0]
         if current:
-            mean = sum(lv[0] for lv in current) / len(current)
-            if mean == 0:
-                fits = price == 0
+            if max_width is not None:
+                fits = price - current[0][0] <= max_width
             else:
-                fits = abs(price - mean) / abs(mean) * 100 <= merge_pct
+                mean = sum(lv[0] for lv in current) / len(current)
+                if mean == 0:
+                    fits = price == 0
+                else:
+                    fits = abs(price - mean) / abs(mean) * 100 <= merge_pct
             if fits:
                 current.append(level)
                 continue
@@ -400,22 +445,33 @@ def support_resistance(
     *,
     wing: int = 2,
     merge_pct: float = 0.5,
+    merge_atr: float = MERGE_ATR,
     n_bins: int = 50,
     top_nodes: int = 5,
     recent_bars: int = 20,
-    top_n: int = 3,
+    window_below: float = WINDOW_BELOW_ATR,
+    window_above: float = WINDOW_ABOVE_ATR,
+    per_side: int = PER_SIDE,
+    min_side: int = MIN_SIDE,
 ) -> dict[str, list[Zone]]:
     """
-    Top `top_n` support and resistance zones relative to the last valid close.
+    Support and resistance zones around the last valid close (2026-09-24
+    selection, superseding Part 1.6's top 3 by score).
 
-    Zones with price below the last close are support, all others (including
-    a zone price equal to the close) are resistance. Each side is sorted by
-    score descending, then by distance to the close ascending.
+    Levels merge while a band stays <= `merge_atr` x ATR14 wide. Zones with
+    price below the last close are support, all others (including a zone
+    price equal to the close) are resistance. Inside the window
+    [close - window_below x ATR, close + window_above x ATR] — a support
+    zone is inside when its high is, a resistance zone when its low is —
+    each side keeps its nearest `per_side` zones, nearest first; a side with
+    fewer than `min_side` inside is filled from outside, nearest first.
+    With no ATR14 (fewer than ATR_PERIOD + 1 bars) the merge falls back to
+    `merge_pct` and there is no window: the nearest `per_side` a side.
 
     Returns:
         {"support": [Zone, ...], "resistance": [Zone, ...]} — either list may
-        be shorter than `top_n` or empty. Empty input or no valid close gives
-        two empty lists.
+        be shorter than `per_side` or empty. Empty input or no valid close
+        gives two empty lists.
     """
     lengths = {len(high), len(low), len(close), len(volume)}
     if len(lengths) != 1:
@@ -426,6 +482,8 @@ def support_resistance(
     if n == 0 or len(valid_close) == 0:
         return {"support": [], "resistance": []}
     last_close = float(valid_close.iloc[-1])
+    atr = float(calc_atr(high, low, close, ATR_PERIOD).iloc[-1]) if n > ATR_PERIOD else float("nan")
+    has_atr = not np.isnan(atr) and atr > 0
 
     swing_highs, swing_lows = fractal_swings(high, low, wing=wing)
     h = high.to_numpy(dtype=float)
@@ -437,13 +495,24 @@ def support_resistance(
         for p in volume_nodes(high, low, close, volume, n_bins=n_bins, top_nodes=top_nodes)
     ]
 
-    zones = score_zones(merge_levels(levels, merge_pct=merge_pct), n_bars=n, recent_bars=recent_bars)
+    groups = merge_levels(levels, merge_pct=merge_pct, max_width=merge_atr * atr if has_atr else None)
+    zones = score_zones(groups, n_bars=n, recent_bars=recent_bars)
 
-    def rank(z: Zone) -> tuple[int, float]:
-        return (-z.score, abs(z.price - last_close))
+    def nearest(items: list[Zone]) -> list[Zone]:
+        return sorted(items, key=lambda z: (abs(z.price - last_close), -z.score))
 
-    support = sorted((z for z in zones if z.price < last_close), key=rank)[:top_n]
-    resistance = sorted((z for z in zones if z.price >= last_close), key=rank)[:top_n]
+    def select(side_zones: list[Zone], inside_key) -> list[Zone]:
+        if not has_atr:
+            return nearest(side_zones)[:per_side]
+        lo_w, hi_w = last_close - window_below * atr, last_close + window_above * atr
+        inside = nearest([z for z in side_zones if lo_w <= inside_key(z) <= hi_w])[:per_side]
+        if len(inside) < min_side:
+            outside = nearest([z for z in side_zones if z not in inside])
+            inside += outside[: min_side - len(inside)]
+        return inside
+
+    support = select([z for z in zones if z.price < last_close], lambda z: z.high)
+    resistance = select([z for z in zones if z.price >= last_close], lambda z: z.low)
     return {"support": [_with_history(z, high, low, close) for z in support],
             "resistance": [_with_history(z, high, low, close) for z in resistance]}
 
@@ -460,4 +529,6 @@ def _with_history(zone: Zone, high: pd.Series, low: pd.Series, close: pd.Series)
         low=zone.low, high=zone.high, price=zone.price, score=zone.score,
         methods=zone.methods, tests=zone.tests, recent=zone.recent, volume_node=zone.volume_node,
         touches=hist.touches, held=hist.held, broke=hist.broke, last_touch=last,
+        held_below=hist.held_below, broke_below=hist.broke_below,
+        held_above=hist.held_above, broke_above=hist.broke_above,
     )

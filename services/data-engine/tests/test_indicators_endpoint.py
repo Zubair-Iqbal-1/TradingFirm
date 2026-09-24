@@ -127,7 +127,8 @@ async def test_indicators_returns_full_set(full_pool):
     assert body["zones"]["support"] and body["zones"]["resistance"]
     assert set(body["zones"]["support"][0]) == {"low", "high", "price", "score", "methods",
                                                 "tests", "recent", "volumeNode",
-                                                "touches", "held", "broke", "lastTouch"}
+                                                "touches", "held", "broke", "lastTouch",
+                                                "heldBelow", "brokeBelow", "heldAbove", "brokeAbove"}
     assert body["lastSwingLow"] == expected_json["lastSwingLow"]
     assert set(body["lastSwingLow"]) == {"price", "date"}
 

@@ -486,8 +486,9 @@ def test_zones_use_full_history_not_52_weeks():
     assert [z.price for z in full["support"]] != [z.price for z in windowed["support"]]
     # every zone carries its history and a dated last touch
     for z in snap["zones"]["support"] + snap["zones"]["resistance"]:
-        assert {"touches", "held", "broke", "last_touch"} <= set(z)
+        assert {"touches", "held", "broke", "last_touch", "held_below", "broke_below", "held_above", "broke_above"} <= set(z)
         assert z["touches"] >= z["held"] + z["broke"]
+        assert z["held"] == z["held_below"] + z["held_above"] and z["broke"] == z["broke_below"] + z["broke_above"]
         assert z["last_touch"] is None or z["last_touch"].startswith("2026-01-")
 
 
@@ -522,6 +523,7 @@ def test_zone_to_dict_shape():
         "low": 1.0, "high": 2.0, "price": 1.5, "score": 25, "methods": ["swing_low"],
         "tests": 1, "recent": False, "volume_node": True,
         "touches": 0, "held": 0, "broke": 0, "last_touch": None,
+        "held_below": 0, "broke_below": 0, "held_above": 0, "broke_above": 0,
     }
 
 

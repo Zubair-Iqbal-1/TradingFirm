@@ -7,10 +7,12 @@ pivots. No network, no fixtures, no I/O.
 Conventions under test (docs/decisions.md, Part 1.6):
   - strict fractals; NaN high/low disqualifies the bar and its window
   - volume nodes bin by close over [min low, max high]; NaN close/volume skipped
-  - running-mean merge, inclusive of merge_pct
+  - merge: a band never wider than 0.5 x ATR14 (2026-09-24); the 0.5 %
+    running-mean rule when there is no ATR
   - rubric: +30 both swing methods, +25 volume node (not a method),
     +20 tested twice, +15 recent
-  - split on last valid close; zone price == close is resistance
+  - split on last valid close; zone price == close is resistance; each
+    side the nearest 6 inside [close - 2.5 ATR, close + 8 ATR], filled to 3
 """
 
 import numpy as np
@@ -33,11 +35,14 @@ from indicators import (
 # Volume: all 1 except bar 13 (close 107) = 100, so with n_bins=15 over
 # [95, 110] (width 1) the single top node is bin [107, 108) -> 107.5.
 #
-# Merge (0.5%, running mean):
-#   95                        -> alone
-#   99.6, 100  (0.4016%)      -> zone [99.6, 100], price 99.8
-#   107.5, 108 (0.465%)       -> zone [107.5, 108], price 107.75
-#   110                       -> alone (1.85% from 108)
+# ATR14 of the series = 4.9571 (bar 16), so the merge width is 2.4786:
+#   95                        -> alone (99.6 is 4.6 above)
+#   99.6, 100  (0.4 wide)     -> zone [99.6, 100], price 99.8
+#   107.5, 108 (0.5 wide)     -> zone [107.5, 108], price 107.75
+#   110                       -> alone (2.5 above 107.5 > 2.4786)
+# (the same four groups the 0.5 % rule gave before 2026-09-24)
+# Window on the last close 105: [92.6, 144.7] holds every zone; each side
+# returns its zones nearest first.
 #
 # Scores with recent_bars=5 (recent = idx >= 12):
 #   95      swing_low idx 8                 -> 0
@@ -175,8 +180,8 @@ def test_support_resistance_splits_by_last_close_and_ranks_by_score():
     assert [z.score for z in out["resistance"]] == [40, 0]
 
     top = out["resistance"][0]
-    # 4.8a-de: the zone carries its history (2 touches, both held; no date on a RangeIndex)
-    assert top == Zone(107.5, 108.0, 107.75, 40, ("swing_high",), 1, True, True, 2, 2, 0, None)
+    # 4.8a-de: the zone carries its history (2 touches, both held from below; no date on a RangeIndex)
+    assert top == Zone(107.5, 108.0, 107.75, 40, ("swing_high",), 1, True, True, 2, 2, 0, None, 2, 0, 0, 0)
 
     # Zone price == last close -> resistance, not support. Moving the last
     # close onto the 107.75 zone changes only that bar's bin (still bin
@@ -188,19 +193,58 @@ def test_support_resistance_splits_by_last_close_and_ranks_by_score():
     assert _prices(out["resistance"]) == pytest.approx([107.75, 110.0])
 
 
-def test_support_resistance_caps_at_three_per_side():
-    # No fractals (5 bars, middle bar is not an extreme). 10 bins of width 1
-    # over [100, 110]; four closes with volume land in bins 0-3, the last
-    # close (110) carries no volume. Four volume-only zones, all score 25,
-    # so ranking falls to distance from the close: 103.5, 102.5, 101.5.
-    px = pd.Series([100, 101, 102, 103, 110], dtype=float)
-    volume = pd.Series([4, 3, 2, 1, 0], dtype=float)
-    out = support_resistance(px, px, px, volume, n_bins=10, top_nodes=4)
-    assert _prices(out["support"]) == pytest.approx([103.5, 102.5, 101.5])
-    assert out["resistance"] == []
+def test_support_resistance_nearest_six_inside_the_window_filled_to_three():
+    """2026-09-24 selection on a ladder: 40 bars closing at 100 with one
+    swing low per dip (90..98) and one swing high per spike (102..110), no
+    volume node (top_nodes=0), merge_atr=0 so every level is its own zone.
+    The window is set in ATR units from the frame's own ATR14 so that its
+    floor sits between 97 and 98 and its top between 108 and 109: support
+    inside = 98 only, filled to 3 with 97 and 96 (nearest first); resistance
+    inside = 102..108, the nearest 6 → 102..107."""
+    from indicators.volatility import calc_atr
+    close = pd.Series([100.0] * 40)
+    high = pd.Series([101.0] * 40)
+    low = pd.Series([99.0] * 40)
+    for k, price in enumerate(range(90, 99)):          # swing lows at bars 2, 6, ...
+        low.iloc[2 + 4 * k] = float(price)
+    for k, price in enumerate(range(102, 111)):        # swing highs at bars 4, 8, ...
+        high.iloc[4 + 4 * k] = float(price)
+    atr = float(calc_atr(high, low, close, 14).iloc[-1])
+    kw = dict(n_bins=1, top_nodes=0, merge_atr=0.0, window_below=2.5 / atr, window_above=8.5 / atr)
+    out = support_resistance(high, low, close, pd.Series([1.0] * 40), **kw)
+    assert _prices(out["support"]) == [98.0, 97.0, 96.0]
+    assert _prices(out["resistance"]) == [102.0, 103.0, 104.0, 105.0, 106.0, 107.0]
+    # a wider window lets 97 and 96 in on their own, and per_side 9 keeps 108 too
+    out = support_resistance(high, low, close, pd.Series([1.0] * 40), **{**kw, "window_below": 4.5 / atr, "per_side": 9})
+    assert _prices(out["support"]) == [98.0, 97.0, 96.0]
+    assert _prices(out["resistance"]) == [102.0, 103.0, 104.0, 105.0, 106.0, 107.0, 108.0]
+    # the defaults: never more than 6 a side, never fewer than 3 while zones exist
+    out = support_resistance(high, low, close, pd.Series([1.0] * 40), n_bins=1, top_nodes=0)
+    assert 3 <= len(out["support"]) <= 6 and 3 <= len(out["resistance"]) <= 6
 
 
-# ── Failure branches ──────────────────────────────────────────────────────
+def test_support_resistance_without_atr_sends_the_nearest_six():
+    # 9 bars: no ATR14, so no window and the 0.5 % merge. 10 bins of width 1
+    # over [100, 110]; eight volume-only zones below the close 110; the
+    # nearest six are kept, nearest first.
+    px = pd.Series([100, 101, 102, 103, 104, 105, 106, 107, 110], dtype=float)
+    volume = pd.Series([8, 7, 6, 5, 4, 3, 2, 1, 0], dtype=float)
+    out = support_resistance(px, px, px, volume, n_bins=10, top_nodes=8)
+    assert len(out["support"]) == 6 and out["resistance"] == []
+    assert _prices(out["support"]) == sorted(_prices(out["support"]), reverse=True)
+
+
+def test_merge_levels_width_cap():
+    """A band never grows wider than max_width: 100, 100.4, 100.8, 101.2 with
+    max_width 1.0 → [100 .. 100.8] (0.8 wide) and [101.2] (1.2 > 1.0 from
+    100), where the running-mean rule would have chained all four."""
+    levels = [(100.0, "swing_low", 1), (100.4, "swing_low", 5), (100.8, "swing_high", 9), (101.2, "volume", None)]
+    groups = merge_levels(levels, max_width=1.0)
+    assert [[lv[0] for lv in g] for g in groups] == [[100.0, 100.4, 100.8], [101.2]]
+    # the 0.5 % running-mean rule (no ATR) splits the same ladder in two:
+    # 100.8 sits 0.6 % above mean(100, 100.4), 101.2 then joins 100.8
+    assert [[lv[0] for lv in g] for g in merge_levels(levels, merge_pct=0.5)] == [[100.0, 100.4], [100.8, 101.2]]
+    assert [[lv[0] for lv in g] for g in merge_levels(levels, max_width=0.3)] == [[100.0], [100.4], [100.8], [101.2]]
 
 
 def test_support_resistance_empty_returns_empty_lists():
@@ -297,10 +341,12 @@ def _bars(rows):
 
 
 def test_zone_history_counts_touch_held_broke():
-    assert _hist((99.6, 100.0)) == ZoneHistory(3, 2, 1, 14)
-    assert _hist((107.5, 108.0)) == ZoneHistory(2, 2, 0, 12)
-    assert _hist((95.0, 95.0)) == ZoneHistory(1, 1, 0, 8)
-    assert _hist((110.0, 110.0)) == ZoneHistory(1, 1, 0, 5)
+    # the split: (99.6, 100) was approached from above three times — held,
+    # broke, held — so held_above 2 / broke_above 1 and nothing from below
+    assert _hist((99.6, 100.0)) == ZoneHistory(3, 2, 1, 14, 0, 0, 2, 1)
+    assert _hist((107.5, 108.0)) == ZoneHistory(2, 2, 0, 12, 2, 0, 0, 0)
+    assert _hist((95.0, 95.0)) == ZoneHistory(1, 1, 0, 8, 0, 0, 1, 0)
+    assert _hist((110.0, 110.0)) == ZoneHistory(1, 1, 0, 5, 1, 0, 0, 0)
     # a band the series never reaches
     assert _hist((120.0, 121.0)) == ZoneHistory(0, 0, 0, None)
 
@@ -310,12 +356,12 @@ def test_zone_history_far_close_in_episode_beats_earlier_hold():
     close 49.80 (an approach-side close), day 2 low 49.90 high 50.60 close
     50.50 (a far close in the same episode) → broke, not held."""
     h, lo, c = _bars([(49.8, 49.0, 49.5), (50.1, 49.5, 49.8), (50.6, 49.9, 50.5), (51.0, 50.4, 50.8)])
-    assert zone_history(h, lo, c, 50.0, 50.2) == ZoneHistory(1, 0, 1, 2)
+    assert zone_history(h, lo, c, 50.0, 50.2) == ZoneHistory(1, 0, 1, 2, 0, 1, 0, 0)
 
 
 def test_zone_history_touch_that_holds_on_its_own_close():
     h, lo, c = _bars([(49.8, 49.0, 49.5), (50.1, 49.5, 49.8), (49.9, 49.2, 49.6)])
-    assert zone_history(h, lo, c, 50.0, 50.2) == ZoneHistory(1, 1, 0, 1)
+    assert zone_history(h, lo, c, 50.0, 50.2) == ZoneHistory(1, 1, 0, 1, 1, 0, 0, 0)
     # the last bar of an episode also starts its window: no close after it → undecided
     assert zone_history(h[:2], lo[:2], c[:2], 50.0, 50.2) == ZoneHistory(1, 0, 0, 1)
 
@@ -329,7 +375,7 @@ def test_zone_history_slow_rejection_is_undecided():
     # the same shape rejected at e0+3 is held
     rows = [(49.8, 49.0, 49.5)] + [(50.3, 49.9, 50.1)] * 3 + [(49.8, 49.0, 49.5)]
     h, lo, c = _bars(rows)
-    assert zone_history(h, lo, c, 50.0, 50.2) == ZoneHistory(1, 1, 0, 3)
+    assert zone_history(h, lo, c, 50.0, 50.2) == ZoneHistory(1, 1, 0, 3, 1, 0, 0, 0)
     # hold_bars is the knob
     assert zone_history(h, lo, c, 50.0, 50.2, hold_bars=2) == ZoneHistory(1, 0, 0, 3)
 
@@ -341,18 +387,18 @@ def test_zone_history_far_close_after_long_inside_run_is_broke():
     reaches it."""
     inside = (50.3, 49.9, 50.1)
     h, lo, c = _bars([(49.8, 49.0, 49.5)] + [inside] * 6 + [(51.5, 50.5, 51.0)])
-    assert zone_history(h, lo, c, 50.0, 50.2) == ZoneHistory(1, 0, 1, 6)
+    assert zone_history(h, lo, c, 50.0, 50.2) == ZoneHistory(1, 0, 1, 6, 0, 1, 0, 0)
     h, lo, c = _bars([(49.8, 49.0, 49.5)] + [inside] * 6 + [(51.5, 50.1, 51.0)])
-    assert zone_history(h, lo, c, 50.0, 50.2) == ZoneHistory(1, 0, 1, 7)
+    assert zone_history(h, lo, c, 50.0, 50.2) == ZoneHistory(1, 0, 1, 7, 0, 1, 0, 0)
 
 
 def test_zone_history_gap_through_band_is_a_break():
     # day 1 opens and closes above the band without a bar inside it
     h, lo, c = _bars([(49.8, 49.0, 49.5), (51.5, 50.5, 51.0), (51.8, 51.0, 51.3)])
-    assert zone_history(h, lo, c, 50.0, 50.2) == ZoneHistory(1, 0, 1, 1)
+    assert zone_history(h, lo, c, 50.0, 50.2) == ZoneHistory(1, 0, 1, 1, 0, 1, 0, 0)
     # the bar after an episode is judged by the outcome rule, never as a jump
     h, lo, c = _bars([(49.8, 49.0, 49.5), (50.1, 49.5, 49.8), (51.5, 50.5, 51.0)])
-    assert zone_history(h, lo, c, 50.0, 50.2) == ZoneHistory(1, 0, 1, 1)
+    assert zone_history(h, lo, c, 50.0, 50.2) == ZoneHistory(1, 0, 1, 1, 0, 1, 0, 0)
 
 
 def test_zone_history_approach_side_flips():
@@ -363,7 +409,7 @@ def test_zone_history_approach_side_flips():
         (52.0, 51.0, 51.5), (51.8, 51.0, 51.3),                        # jump: broke
         (51.2, 50.1, 50.9), (51.5, 50.6, 51.0),                        # held from above
     ])
-    assert zone_history(h, lo, c, 50.0, 50.2) == ZoneHistory(3, 2, 1, 5)
+    assert zone_history(h, lo, c, 50.0, 50.2) == ZoneHistory(3, 2, 1, 5, 1, 1, 1, 0)   # held from below, broke from below (the jump), held from above
 
 
 def test_zone_history_skips_until_a_close_outside():
@@ -371,7 +417,7 @@ def test_zone_history_skips_until_a_close_outside():
     # a close outside exists
     h, lo, c = _bars([(50.15, 49.95, 50.10), (50.15, 49.95, 50.05), (49.8, 49.0, 49.5),
                       (50.1, 49.5, 49.8), (49.9, 49.2, 49.6)])
-    assert zone_history(h, lo, c, 50.0, 50.2) == ZoneHistory(1, 1, 0, 3)
+    assert zone_history(h, lo, c, 50.0, 50.2) == ZoneHistory(1, 1, 0, 3, 1, 0, 0, 0)
 
 
 def test_zone_history_nan_bars_ignored():
@@ -379,7 +425,7 @@ def test_zone_history_nan_bars_ignored():
     # close (e0+2, approach side) completes the window → held
     h, lo, c = _bars([(49.8, 49.0, 49.5), (50.1, 49.5, 49.8), (np.nan, np.nan, np.nan),
                       (49.9, 49.2, 49.6), (50.1, 49.5, 49.9), (49.9, 49.2, 49.6)])
-    assert zone_history(h, lo, c, 50.0, 50.2) == ZoneHistory(2, 2, 0, 4)
+    assert zone_history(h, lo, c, 50.0, 50.2) == ZoneHistory(2, 2, 0, 4, 2, 0, 0, 0)
     # a NaN close alone disqualifies the bar too
     h, lo, c = _bars([(49.8, 49.0, 49.5), (50.1, 49.5, np.nan), (49.9, 49.2, 49.6)])
     assert zone_history(h, lo, c, 50.0, 50.2) == ZoneHistory(0, 0, 0, None)
@@ -391,7 +437,7 @@ def test_zone_history_open_episode_is_undecided():
     assert zone_history(h, lo, c, 50.0, 50.2) == ZoneHistory(1, 0, 0, 2)
     # but a far close already seen is a break whatever follows
     h, lo, c = _bars([(49.8, 49.0, 49.5), (50.6, 49.9, 50.5), (50.3, 49.9, 50.1)])
-    assert zone_history(h, lo, c, 50.0, 50.2) == ZoneHistory(1, 0, 1, 2)
+    assert zone_history(h, lo, c, 50.0, 50.2) == ZoneHistory(1, 0, 1, 2, 0, 1, 0, 0)
 
 
 def test_zone_history_empty_series():
@@ -406,7 +452,9 @@ def test_support_resistance_zones_carry_history():
     out = _run()
     by_price = {round(z.price, 2): z for z in out["support"] + out["resistance"]}
     assert (by_price[99.8].touches, by_price[99.8].held, by_price[99.8].broke) == (3, 2, 1)
+    assert (by_price[99.8].held_below, by_price[99.8].broke_below, by_price[99.8].held_above, by_price[99.8].broke_above) == (0, 0, 2, 1)
     assert (by_price[107.75].touches, by_price[107.75].held, by_price[107.75].broke) == (2, 2, 0)
+    assert (by_price[107.75].held_below, by_price[107.75].broke_below) == (2, 0)
     # a RangeIndex has no date to name
     assert by_price[99.8].last_touch is None
     # a DatetimeIndex names the last touch by its bar date, no tz conversion
@@ -428,3 +476,12 @@ def test_last_swing_low_none_without_pivot():
     assert last_swing_low(EMPTY, EMPTY) is None
     flat = pd.Series([100.0] * 9)
     assert last_swing_low(flat, flat) is None
+
+
+def test_zone_history_side_split_sums_to_the_totals():
+    """The four split counts partition held and broke by approach side; the
+    totals stay what they were (2026-09-24)."""
+    for band in ((99.6, 100.0), (107.5, 108.0), (95.0, 95.0), (110.0, 110.0)):
+        h = _hist(band)
+        assert h.held == h.held_below + h.held_above and h.broke == h.broke_below + h.broke_above
+        assert h.touches >= h.held + h.broke

@@ -21,7 +21,9 @@ One JSON document between two `<data-…>` tags, holding:
   `UsdM` is millions of dollars; `rsi14` and every `score` are 0–100, `rvol`
   is a ratio, `macd*` are in dollars, a zone's `touches`, `held` and `broke`
   are counts of times price reached the level and held or closed through
-  it, and every other bare number is a price in dollars.
+  it (`heldBelow` / `brokeBelow` count approaches from below, the level
+  acting as resistance; `heldAbove` / `brokeAbove` approaches from above,
+  as support), and every other bare number is a price in dollars.
 - `events` — recent news for the ticker, already grouped so that one story
   reported by several outlets is one line. `sources` is how many outlets
   carried it, `relevance` and `sentiment` (-1 to 1) come from a separate

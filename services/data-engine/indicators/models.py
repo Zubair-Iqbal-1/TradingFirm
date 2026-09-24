@@ -28,6 +28,12 @@ class ZoneOut(BaseModel):
     held: int = 0
     broke: int = 0
     last_touch: Optional[str] = Field(None, alias="lastTouch")
+    # 2026-09-24: the side split. below = approaches from below (the level
+    # tested as resistance), above = from above (tested as support).
+    held_below: int = Field(0, alias="heldBelow")
+    broke_below: int = Field(0, alias="brokeBelow")
+    held_above: int = Field(0, alias="heldAbove")
+    broke_above: int = Field(0, alias="brokeAbove")
 
     model_config = {"populate_by_name": True}
 

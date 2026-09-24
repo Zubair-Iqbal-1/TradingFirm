@@ -36,6 +36,20 @@ def zone(low, high=None, **over):
     return z
 
 
+def res(low, high=None, held=0, broke=0, **over):
+    """A resistance zone whose history is approaches from below (2026-09-24
+    split): heldBelow / brokeBelow carry the counts, the above pair is 0."""
+    return zone(low, high, held=held, broke=broke, heldBelow=held, brokeBelow=broke,
+                heldAbove=0, brokeAbove=0, **over)
+
+
+def sup(low, high=None, held=0, broke=0, **over):
+    """A support zone whose history is approaches from above: heldAbove /
+    brokeAbove carry the counts, the below pair is 0."""
+    return zone(low, high, held=held, broke=broke, heldBelow=0, brokeBelow=0,
+                heldAbove=held, brokeAbove=broke, **over)
+
+
 ZONES_A = [zone(45.00, 45.40), zone(47.80, 48.10), zone(53.90, 54.30), zone(56.90, 57.30)]
 
 
@@ -358,13 +372,13 @@ def test_zone_history_replaces_tests_in_basis():
     """4.8a-de change 7: a zone with history prints touches / held / broke /
     last and not its `tests` count, so a level reads one way; a zone without
     history still prints the swing count. Malformed fields are not printed."""
-    zones = [zone(47.80, 48.10, tests=4, touches=6, held=4, broke=1, lastTouch="2026-09-02", score=65),
-             zone(56.90, 57.30, tests=3, touches=3, held=3, broke=0, lastTouch="2026-08-12", volumeNode=True, score=85)]
+    zones = [sup(47.80, 48.10, tests=4, touches=6, held=4, broke=1, lastTouch="2026-09-02", score=65),
+             res(56.90, 57.30, tests=3, touches=3, held=3, broke=0, lastTouch="2026-08-12", volumeNode=True, score=85)]
     p = plan(zones=zones)
-    assert p.targets[0].basis == ("T1 56.90: resistance 56.90-57.30, touches 3, held 3, broke 0, "
-                                  "last 2026-08-12, volume node, score 85, ceiling")
-    assert p.stop_basis.startswith("stop 46.60: support 47.80-48.10, touches 6, held 4, broke 1, last 2026-09-02, "
-                                   "score 65, low 47.80 - 1xATR 1.20")
+    assert p.targets[0].basis == ("T1 56.90: resistance 56.90-57.30, touches 3, held 3 (3 below, 0 above), "
+                                  "broke 0 (0 below, 0 above), last 2026-08-12, volume node, score 85, ceiling")
+    assert p.stop_basis.startswith("stop 46.60: support 47.80-48.10, touches 6, held 4 (0 below, 4 above), "
+                                   "broke 1 (0 below, 1 above), last 2026-09-02, score 65, low 47.80 - 1xATR 1.20")
     assert "tests" not in p.stop_basis and "tests" not in p.targets[0].basis
     # malformed → not printed, never a raise; `held` alone still switches the text
     p = plan(zones=[zone(47.80), zone(56.90, held=None, broke="2", lastTouch=" ", tests=True, touches=-1)])
@@ -532,7 +546,7 @@ def test_rejection_order():
     # every target beyond the cap and size zero: no_target first
     assert plan(zones=[zone(47.80), zone(60.00)], account=100).reason == "no_target"
     # a ceiling under 1.5R and size zero: ceiling first; and ceiling before low_r
-    capped = [zone(49.00), zone(52.80, 53.10, held=4, broke=0), zone(56.90)]
+    capped = [zone(49.00), res(52.80, 53.10, held=4, broke=0), zone(56.90)]
     assert plan(zones=capped, account=100).reason == "ceiling"
     assert plan(zones=capped).reason == "ceiling"
     # low R and size zero: T1 first
@@ -567,27 +581,27 @@ def test_plan_math_version_is_three():
 
 # ── Plan math v3 (4.8a-de): the stop preference, the extension, the ceiling ─
 
-NEAR = [zone(49.00, 49.10, held=1, broke=0), zone(56.90, 57.30)]   # stop 47.80, risk 2.20 = 1.83 ATR
+NEAR = [sup(49.00, 49.10, held=1, broke=0), zone(56.90, 57.30)]   # stop 47.80, risk 2.20 = 1.83 ATR
 
 
 def test_stop_prefers_most_held_support_within_two_atr():
     # P 49.00-49.10 held 1 → 47.80 (1.83 ATR); Q 48.80-48.90 held 4 → 47.60 (2.00 ATR): Q wins
-    p = plan(zones=[zone(49.00, 49.10, held=1, broke=0), zone(48.80, 48.90, held=4, broke=0), zone(56.90)])
+    p = plan(zones=[sup(49.00, 49.10, held=1, broke=0), sup(48.80, 48.90, held=4, broke=0), zone(56.90)])
     assert p.stop == 47.60
-    assert p.stop_basis == ("stop 47.60: support 48.80-48.90, held 4, broke 0, score 50, low 48.80 - 1xATR 1.20; "
-                            "most held of 2 support zones within 2 ATR")
+    assert p.stop_basis == ("stop 47.60: support 48.80-48.90, held 4 (0 below, 4 above), broke 0 (0 below, 0 above), "
+                            "score 50, low 48.80 - 1xATR 1.20; most held from above of 2 support zones within 2 ATR")
     assert p.extended is False
 
 
 def test_stop_ignores_most_held_support_beyond_two_atr():
     # Q at 48.40-48.50 → 47.20, risk 2.80 = 2.33 ATR: out, whatever it held
-    p = plan(zones=[zone(49.00, 49.10, held=1, broke=0), zone(48.40, 48.50, held=9, broke=0), zone(56.90)])
+    p = plan(zones=[sup(49.00, 49.10, held=1, broke=0), sup(48.40, 48.50, held=9, broke=0), zone(56.90)])
     assert p.stop == 47.80 and "most held" not in p.stop_basis
-    assert p.stop_basis.startswith("stop 47.80: support 49.00-49.10, held 1, broke 0")
+    assert p.stop_basis.startswith("stop 47.80: support 49.00-49.10, held 1 (0 below, 1 above), broke 0 (0 below, 0 above)")
 
 
 def test_stop_tie_on_held_takes_highest_low():
-    p = plan(zones=[zone(49.00, held=2, broke=0), zone(48.90, held=2, broke=0), zone(56.90)])
+    p = plan(zones=[sup(49.00, held=2, broke=0), sup(48.90, held=2, broke=0), zone(56.90)])
     assert p.stop == 47.80
     # no history at all → v2's rule, the highest low
     p = plan(zones=[zone(49.00), zone(48.90), zone(56.90)])
@@ -596,8 +610,8 @@ def test_stop_tie_on_held_takes_highest_low():
 
 def test_stop_two_atr_boundary_inclusive():
     # low 48.80 → stop 47.60, risk 2.40 = 2.00 ATR: eligible; 48.79 → 2.41 = 2.01 ATR: far
-    assert plan(zones=[zone(48.80, held=1), zone(56.90)]).extended is False
-    p = plan(zones=[zone(48.79, held=1), zone(56.90)])
+    assert plan(zones=[sup(48.80, held=1), zone(56.90)]).extended is False
+    p = plan(zones=[sup(48.79, held=1), zone(56.90)])
     assert p.stop == 47.59 and p.extended is True and p.entry_for_max_risk == 49.99
 
 
@@ -672,10 +686,10 @@ def test_basis_arithmetic_reconciles():
             assert m is None
 
 
-CEIL_SUP = zone(49.00, 49.10, touches=2, held=1, broke=0, lastTouch="2026-09-01")   # stop 47.80, risk 2.20
-CEIL_A = zone(52.00, 52.20, touches=3, held=1, broke=2, lastTouch="2026-08-01")     # 0.91R, looked through
-CEIL_B = zone(53.50, 53.80, touches=5, held=4, broke=0, lastTouch="2026-08-12")     # 1.59R, ceiling
-CEIL_C = zone(56.00, 56.30, touches=2, held=2, broke=0, lastTouch="2026-07-01")     # 2.73R, beyond the ceiling
+CEIL_SUP = sup(49.00, 49.10, touches=2, held=1, broke=0, lastTouch="2026-09-01")   # stop 47.80, risk 2.20
+CEIL_A = res(52.00, 52.20, touches=3, held=1, broke=2, lastTouch="2026-08-01")     # 0.91R, looked through
+CEIL_B = res(53.50, 53.80, touches=5, held=4, broke=0, lastTouch="2026-08-12")     # 1.59R, ceiling
+CEIL_C = res(56.00, 56.30, touches=2, held=2, broke=0, lastTouch="2026-07-01")     # 2.73R, beyond the ceiling
 
 
 def test_ceiling_caps_t1():
@@ -683,34 +697,34 @@ def test_ceiling_caps_t1():
     p = plan(zones=[CEIL_SUP, CEIL_A, CEIL_B, CEIL_C])
     assert prices(p.overhead) == [52.00] and rs(p.overhead) == [0.91]
     assert prices(p.targets) == [53.50] and rs(p.targets) == [1.59]
-    assert p.targets[0].basis == ("T1 53.50: resistance 53.50-53.80, touches 5, held 4, broke 0, last 2026-08-12, "
-                                  "score 50, ceiling")
+    assert p.targets[0].basis == ("T1 53.50: resistance 53.50-53.80, touches 5, held 4 (4 below, 0 above), "
+                                  "broke 0 (0 below, 0 above), last 2026-08-12, score 50, ceiling")
     # without the history C is T2 (v2 behaviour)
     p = plan(zones=[CEIL_SUP, zone(52.00, 52.20), zone(53.50, 53.80), zone(56.00, 56.30)])
     assert prices(p.targets) == [53.50, 56.00]
 
 
 def test_ceiling_under_min_r_rejects_ceiling():
-    b = zone(52.80, 53.10, touches=5, held=4, broke=0, lastTouch="2026-08-12")
+    b = res(52.80, 53.10, touches=5, held=4, broke=0, lastTouch="2026-08-12")
     r = plan(zones=[CEIL_SUP, CEIL_A, b, CEIL_C])
-    assert r == PlanRejected("ceiling", "resistance 52.80-53.10, touches 5, held 4, broke 0, last 2026-08-12, "
-                                        "score 50 caps the trade at 1.27R")
+    assert r == PlanRejected("ceiling", "resistance 52.80-53.10, touches 5, held 4 (4 below, 0 above), "
+                                        "broke 0 (0 below, 0 above), last 2026-08-12, score 50 caps the trade at 1.27R")
 
 
 def test_ceiling_ratio_rule():
     # held 3 / broke 1 → 3 >= 3: a ceiling; held 3 / broke 2 → 3 < 6: not
-    yes = zone(52.80, 53.10, held=3, broke=1)
-    no = zone(52.80, 53.10, held=3, broke=2)
+    yes = res(52.80, 53.10, held=3, broke=1)
+    no = res(52.80, 53.10, held=3, broke=2)
     assert plan(zones=[CEIL_SUP, yes, CEIL_C]).reason == "ceiling"
     p = plan(zones=[CEIL_SUP, no, CEIL_C])
     assert prices(p.overhead) == [52.80] and prices(p.targets) == [56.00]
     # held 2 / broke 0: under the minimum
-    assert prices(plan(zones=[CEIL_SUP, zone(52.80, 53.10, held=2, broke=0), CEIL_C]).targets) == [56.00]
+    assert prices(plan(zones=[CEIL_SUP, res(52.80, 53.10, held=2, broke=0), CEIL_C]).targets) == [56.00]
 
 
 def test_broken_zone_is_looked_through():
     # broke >= held is never a ceiling, however often it held
-    weak = zone(52.80, 53.10, held=5, broke=5)
+    weak = res(52.80, 53.10, held=5, broke=5)
     p = plan(zones=[CEIL_SUP, weak, CEIL_C])
     assert prices(p.overhead) == [52.80] and prices(p.targets) == [56.00]
 
@@ -719,22 +733,22 @@ def test_zone_without_history_is_never_a_ceiling():
     p = plan(zones=[CEIL_SUP, zone(52.80, 53.10, tests=9), CEIL_C])
     assert prices(p.targets) == [56.00] and "ceiling" not in p.targets[0].basis
     # and a zone with held alone (no broke key) can be one
-    assert plan(zones=[CEIL_SUP, zone(52.80, 53.10, held=3), CEIL_C]).reason == "ceiling"
+    assert plan(zones=[CEIL_SUP, zone(52.80, 53.10, heldBelow=3), CEIL_C]).reason == "ceiling"
 
 
 def test_capped_zone_is_never_a_ceiling():
     # a well-held zone beyond 8 ATR (60.00 = 8.33 ATR) is dropped before the walk
-    p = plan(zones=[CEIL_SUP, zone(53.50, 53.80), zone(60.00, 60.20, held=5, broke=0)])
+    p = plan(zones=[CEIL_SUP, zone(53.50, 53.80), res(60.00, 60.20, held=5, broke=0)])
     assert prices(p.targets) == [53.50] and rs(p.targets) == [1.59]
     # inside the cap it is the ceiling and T2
-    p = plan(zones=[CEIL_SUP, zone(53.50, 53.80), zone(58.00, 58.20, held=5, broke=0)])
+    p = plan(zones=[CEIL_SUP, zone(53.50, 53.80), res(58.00, 58.20, held=5, broke=0)])
     assert prices(p.targets) == [53.50, 58.00] and p.targets[1].basis.endswith("ceiling")
 
 
 def test_straddling_ceiling_rejects():
     # a well-held resistance zone the entry sits inside: its high is overhead
     # and the ceiling, so nothing is eligible above it
-    r = plan(zones=[CEIL_SUP, zone(49.70, 50.40, side="resistance", held=4, broke=0), CEIL_C])
+    r = plan(zones=[CEIL_SUP, res(49.70, 50.40, side="resistance", held=4, broke=0), CEIL_C])
     assert r.reason == "ceiling" and r.detail.endswith("caps the trade at 0.18R")
 
 
@@ -810,10 +824,10 @@ def test_rerun_reports_extension_and_ceiling_columns():
     prev = rerun.load_module(str(Path(__file__).resolve().parent.parent / "grading" / "plan_math.py"))
     stored = {"atr14": 1.2, "ema20": 47.5, "zones": {"support": ZONES_A[:2], "resistance": ZONES_A[2:]}}
     fresh = {"atr14": 1.2, "ema20": 47.5, "lastSwingLow": {"price": 49.20, "date": "2026-09-15"},
-             "zones": {"support": [zone(45.00, 45.40, touches=1, held=1, broke=0),
-                                   zone(47.80, 48.10, touches=3, held=2, broke=1)],
-                       "resistance": [zone(53.90, 54.30, touches=5, held=4, broke=0, lastTouch="2026-08-12"),
-                                      zone(56.90, 57.30, touches=2, held=2, broke=0)]}}
+             "zones": {"support": [sup(45.00, 45.40, touches=1, held=1, broke=0),
+                                   sup(47.80, 48.10, touches=3, held=2, broke=1)],
+                       "resistance": [res(53.90, 54.30, touches=5, held=4, broke=0, lastTouch="2026-08-12"),
+                                      res(56.90, 57.30, touches=2, held=2, broke=0)]}}
     row = rerun.rerun_row({"verdictId": "abc", "ticker": "Y", "entry": 50.0, "indicators": stored, "fresh": fresh},
                           prev=prev, account=100_000, risk_pct=1.0)
     assert row["error"] is None
@@ -829,9 +843,10 @@ def test_rerun_reports_extension_and_ceiling_columns():
     assert fresh_run["stop"] == 48.00 and fresh_run["stopRule"] == "swing low" and fresh_run["extended"] == "no"
     assert fresh_run["swingLow"] == "49.20 (2026-09-15)" and fresh_run["riskAtr"] == 1.67
     assert fresh_run["t1"] == "53.90 (1.95R)" and fresh_run["ceiling"] == "53.90" and fresh_run["valid"]
-    assert row["zones"] == {"storedSupport": "47.80-48.10", "freshSupport": "47.80-48.10 (touches 3, held 2, broke 1)",
+    assert row["zones"] == {"storedSupport": "47.80-48.10",
+                            "freshSupport": "47.80-48.10 (touches 3, held 2, broke 1; below 0/0, above 2/1)",
                             "storedResistance": "53.90-54.30",
-                            "freshResistance": "53.90-54.30 (touches 5, held 4, broke 0)"}
+                            "freshResistance": "53.90-54.30 (touches 5, held 4, broke 0; below 4/0, above 0/0)"}
     text = rerun.render([row])
     assert "| Y | 50.00 | fresh | v3 | swing low | 48.00 | 1.67 | 0 | 53.90 | 53.90 (1.95R) | no | 49.20 (2026-09-15) | yes | - |" in text
     assert "valid plans: v3 on stored 1 / 1; v3 on fresh, no swing 0 / 1; v3 on fresh 1 / 1" in text
@@ -846,12 +861,45 @@ def test_rerun_ceiling_column_names_the_ceiling_target():
     and the ceiling. The first build printed T1 whenever any target was one."""
     from scripts import plan_math_rerun as rerun
     fresh = {"atr14": 1.2, "ema20": 47.5, "lastSwingLow": {"price": 49.20, "date": "2026-09-15"},
-             "zones": {"support": [zone(47.80, 48.10, touches=3, held=2, broke=1)],
-                       "resistance": [zone(53.90, 54.30, touches=3, held=1, broke=1),
-                                      zone(56.90, 57.30, touches=5, held=4, broke=0)]}}
+             "zones": {"support": [sup(47.80, 48.10, touches=3, held=2, broke=1)],
+                       "resistance": [res(53.90, 54.30, touches=3, held=1, broke=1),
+                                      res(56.90, 57.30, touches=5, held=4, broke=0)]}}
     run = rerun.rerun_row({"verdictId": "abc", "ticker": "Y", "entry": 50.0, "indicators": fresh, "fresh": fresh},
                           prev=None, account=100_000, risk_pct=1.0)["runs"][-1]
     assert run["t1"] == "53.90 (1.95R)" and run["ceiling"] == "56.90"
     assert "| 56.90 | 53.90 (1.95R) |" in rerun.render([rerun.rerun_row(
         {"verdictId": "abc", "ticker": "Y", "entry": 50.0, "indicators": fresh, "fresh": fresh},
         prev=None, account=100_000, risk_pct=1.0)])
+
+
+def test_ceiling_reads_the_below_pair_not_the_totals():
+    """2026-09-24: OPCH's 24.52-24.96 read held 5 / broke 3 in total, but every
+    break came from above (the May fall through it); approached from below it
+    held 5 and broke 0, so it is a ceiling. The mirror image (held only from
+    above, broken from below) is not."""
+    wall = zone(52.80, 53.10, touches=8, held=5, broke=3, heldBelow=5, brokeBelow=0, heldAbove=0, brokeAbove=3)
+    r = plan(zones=[CEIL_SUP, wall, CEIL_C])
+    assert r.reason == "ceiling" and r.detail.startswith("resistance 52.80-53.10, touches 8, held 5 (5 below, 0 above), broke 3 (0 below, 3 above)")
+    mirror = zone(52.80, 53.10, touches=8, held=5, broke=3, heldBelow=0, brokeBelow=3, heldAbove=5, brokeAbove=0)
+    p = plan(zones=[CEIL_SUP, mirror, CEIL_C])
+    assert prices(p.overhead) == [52.80] and prices(p.targets) == [56.00]
+    # totals alone (no split) never make a ceiling
+    assert prices(plan(zones=[CEIL_SUP, zone(52.80, 53.10, held=5, broke=0), CEIL_C]).targets) == [56.00]
+
+
+def test_looked_through_support_is_never_the_stop_zone():
+    """2026-09-24 item 4: a support zone with brokeAbove >= heldAbove is
+    looked through — never the stop zone, never eligible for the most-held
+    choice; the walk goes to the next support below, then the alternatives."""
+    weak = sup(49.00, 49.10, held=1, broke=2)          # would give 47.80
+    strong = sup(48.80, 48.90, held=2, broke=0)        # 47.60, 2.00 ATR: eligible
+    p = plan(zones=[weak, strong, zone(56.90)])
+    assert p.stop == 47.60 and "support 48.80-48.90" in p.stop_basis
+    assert p.stop_basis.endswith("; 1 support zone looked through (broke from above at least as often as held)")
+    # every support looked through → the far branch, EMA20 - ATR
+    p = plan(zones=[weak, sup(48.80, 48.90, held=1, broke=1), zone(56.90)], ema20=49.00)
+    assert p.stop == 47.80 and p.stop_basis.startswith("stop 47.80: EMA20 49.00 - 1xATR 1.20; no support zone below entry 50.00; 2 support zones looked through")
+    # and with no alternative it is no_support
+    assert plan(zones=[weak, zone(56.90)]).reason == "no_support"
+    # a support zone without the split is kept (older dossiers)
+    assert plan(zones=[zone(49.00, 49.10, held=1, broke=2), zone(56.90)]).stop == 47.80

@@ -130,7 +130,11 @@ def _nearest(indicators: Optional[dict], side: str, entry: float) -> Optional[st
     z = min(zones, key=lambda z: abs(key(z)))
     hist = ""
     if z.get("held") is not None:
-        hist = f" (touches {z.get('touches')}, held {z.get('held')}, broke {z.get('broke')})"
+        hist = f" (touches {z.get('touches')}, held {z.get('held')}, broke {z.get('broke')}"
+        if z.get("heldBelow") is not None:
+            hist += (f"; below {z.get('heldBelow')}/{z.get('brokeBelow')}, "
+                     f"above {z.get('heldAbove')}/{z.get('brokeAbove')}")
+        hist += ")"
     return f"{z['low']:.2f}-{z['high']:.2f}{hist}"
 
 

@@ -10,9 +10,11 @@ long swing plan, or a named rejection.
                 is a component and the printed subtraction lands on the
                 level: stop = level_c − atr_c                     (4.8a-de-4)
     stop zone   among the support-side zones whose stop leaves ≤ 2×ATR of
-                risk, the one that held most (ties: highest low); a zone's
-                side is data-engine's label (`side`), the midpoint only when
-                a zone carries none                          (4.8a-de-4, 4.8a-7)
+                risk, the one that held most from above (`heldAbove`; ties:
+                highest low); a support zone with brokeAbove ≥ heldAbove is
+                looked through — never the stop zone, never eligible; a
+                zone's side is data-engine's label (`side`), the midpoint
+                only when a zone carries none    (4.8a-de-4, 4.8a-7, 2026-09-24)
     far         no support zone within 2×ATR: the stop is the highest of
                 {the highest-low support zone's stop, EMA20 − 1×ATR,
                 swing low − 1×ATR} whose raw level is ≤ entry and whose
@@ -24,9 +26,10 @@ long swing plan, or a named rejection.
     candidates  resistance-side zone lows above entry (a straddling zone:
                 its high), floored, ascending; one whose distance in ATRs
                 (2 dp, half-up, exact ATR) exceeds 8 is dropped       (4.8a-2)
-    ceiling     the nearest candidate whose zone held ≥ 3 and held ≥ 3×broke
-                is where the walk stops: it is the last eligible candidate;
-                nothing above it is a target                        (4.8a-de-5)
+    ceiling     the nearest candidate whose zone, approached from below,
+                held ≥ 3 and held ≥ 3×broke (`heldBelow` / `brokeBelow`) is
+                where the walk stops: it is the last eligible candidate;
+                nothing above it is a target          (4.8a-de-5, 2026-09-24)
     T1          the first eligible candidate paying ≥ 1.5R; the ones before
                 it are `overhead` (three listed, the walk continues); no T1
                 under a ceiling → `ceiling`, none at all → `low_r` (4.8a-1)
@@ -197,8 +200,10 @@ class _Zone:
     mid: Decimal
     detail: str
     side: Optional[str]
-    held: Optional[int]
-    broke: Optional[int]
+    held_below: Optional[int]
+    broke_below: Optional[int]
+    held_above: Optional[int]
+    broke_above: Optional[int]
 
     def is_support(self, entry: Decimal) -> bool:
         """data-engine's label when the zone carries one; else the midpoint."""
@@ -207,12 +212,21 @@ class _Zone:
         return self.mid < entry
 
     def is_ceiling(self) -> bool:
-        """held ≥ 3 and held ≥ 3 × broke (4.8a-de decision 5). A zone without
-        history is never a ceiling."""
-        if self.held is None:
+        """Approached from below, held ≥ 3 and held ≥ 3 × broke (4.8a-de
+        decision 5 on the side split, 2026-09-24). A zone without the split
+        is never a ceiling."""
+        if self.held_below is None:
             return False
-        broke = self.broke or 0
-        return self.held >= CEILING_MIN_HELD and self.held >= CEILING_HELD_PER_BROKE * broke
+        broke = self.broke_below or 0
+        return self.held_below >= CEILING_MIN_HELD and self.held_below >= CEILING_HELD_PER_BROKE * broke
+
+    def is_looked_through_support(self) -> bool:
+        """A support zone that gave way from above as often as it held
+        (brokeAbove ≥ heldAbove) is never the stop zone (2026-09-24). A
+        zone without the split is kept."""
+        if self.held_above is None and self.broke_above is None:
+            return False
+        return (self.broke_above or 0) >= (self.held_above or 0)
 
 
 def _count(value: object) -> Optional[int]:
@@ -230,10 +244,13 @@ def _zone_detail(zone: Mapping) -> str:
         touches = _count(zone.get("touches"))
         if touches is not None:
             parts.append(f"touches {touches}")
+        hb, ha = _count(zone.get("heldBelow")), _count(zone.get("heldAbove"))
+        bb, ba = _count(zone.get("brokeBelow")), _count(zone.get("brokeAbove"))
+        split = hb is not None and ha is not None and bb is not None and ba is not None
         if held is not None:
-            parts.append(f"held {held}")
+            parts.append(f"held {held} ({hb} below, {ha} above)" if split else f"held {held}")
         if broke is not None:
-            parts.append(f"broke {broke}")
+            parts.append(f"broke {broke} ({bb} below, {ba} above)" if split else f"broke {broke}")
         last = zone.get("lastTouch")
         if isinstance(last, str) and last.strip():
             parts.append(f"last {last.strip()}")
@@ -264,7 +281,8 @@ def _zones(zones: Sequence[Mapping]) -> list[_Zone]:
         if side is not None and side not in SIDES:
             raise ValueError(f"zone {i} side {side!r} is not one of {SIDES}")
         out.append(_Zone(low, high, (low + high) / TWO, _zone_detail(zone), side,
-                         _count(zone.get("held")), _count(zone.get("broke"))))
+                         _count(zone.get("heldBelow")), _count(zone.get("brokeBelow")),
+                         _count(zone.get("heldAbove")), _count(zone.get("brokeAbove"))))
     return out
 
 
@@ -313,10 +331,12 @@ def compute_plan(
 
     `zones` is data-engine's support + resistance lists pooled; each item
     needs `low` and `high`, carries `side` ("support" / "resistance", the
-    list it came from; absent = classify by midpoint), `held` / `broke`
-    (the stop preference and the ceiling read them; absent = no history),
-    and `touches`, `lastTouch`, `tests`, `volumeNode`, `score` feed the
-    basis text; other keys are ignored. `risk_pct` is a percent: 1.0 means
+    list it came from; absent = classify by midpoint), the side split
+    `heldBelow` / `brokeBelow` (the ceiling reads them) and `heldAbove` /
+    `brokeAbove` (the stop preference and the looked-through rule read
+    them; absent = no history), and `touches`, `held`, `broke`,
+    `lastTouch`, `tests`, `volumeNode`, `score` feed the basis text; other
+    keys are ignored. `risk_pct` is a percent: 1.0 means
     1 % of `account`. `ema20` and `swing_low` are the far-branch stop
     alternatives (None = not available); `swing_low_date` only names the
     swing low in the basis text.
@@ -348,16 +368,20 @@ def compute_plan(
         return atr_distance(e, stop_, a)
 
     # 3. the stop
-    support = [z for z in pool if z.is_support(e)]
+    all_support = [z for z in pool if z.is_support(e)]
     resistance = [z for z in pool if not z.is_support(e)]
+    looked_through = [z for z in all_support if z.is_looked_through_support()]
+    support = [z for z in all_support if z not in looked_through]
     eligible = [(z, level_stop(z.low)) for z in support if risk_atr(level_stop(z.low)) <= FAR_SUPPORT_ATR]
     candidates: list[tuple[Decimal, str]] = []
+    skipped = (f"; {len(looked_through)} support zone{'s' if len(looked_through) != 1 else ''} looked through "
+               f"(broke from above at least as often as held)") if looked_through else ""
     if eligible:
-        z, zone_stop = max(eligible, key=lambda pair: (pair[0].held or 0, pair[0].low))
+        z, zone_stop = max(eligible, key=lambda pair: (pair[0].held_above or 0, pair[0].low))
         rule = f"{_describe('support', z)}, low {money(z.low)} - {STOP_ATR_MULT}xATR {money(a)}"
         if len(eligible) > 1:
-            rule += f"; most held of {len(eligible)} support zones within {FAR_SUPPORT_ATR} ATR"
-        candidates.append((zone_stop, rule))
+            rule += f"; most held from above of {len(eligible)} support zones within {FAR_SUPPORT_ATR} ATR"
+        candidates.append((zone_stop, rule + skipped))
     else:
         if support:
             nearest = max(support, key=lambda z: z.low)
@@ -368,7 +392,7 @@ def compute_plan(
             candidates.append((zone_stop, f"{_describe('support', nearest)}, low {money(nearest.low)}"
                                           f" - {STOP_ATR_MULT}xATR {money(a)}"))
         else:
-            far_note = f"no support zone below entry {money(e)}"
+            far_note = f"no support zone below entry {money(e)}" + skipped
         if ema is not None and ema <= e:
             alt = level_stop(ema)
             if alt > 0:

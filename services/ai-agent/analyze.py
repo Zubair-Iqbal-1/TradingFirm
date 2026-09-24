@@ -80,8 +80,10 @@ UNIT_SUFFIXES = ("Atr", "Pct", "Frac", "Usd", "UsdM")
 PRICE_LEVEL_KEYS = frozenset({"close", "ema20", "ema50", "ema200", "low", "high", "price"})
 CONVENTIONAL_KEYS = frozenset({"rvol", "rsi14", "macd", "macdSignal", "macdHist",
                                "score", "tests", "bars",
-                               # 4.8a-de: a zone's history, counts of episodes
-                               "touches", "held", "broke"})
+                               # 4.8a-de: a zone's history, counts of episodes,
+                               # and the side split (2026-09-24)
+                               "touches", "held", "broke",
+                               "heldBelow", "brokeBelow", "heldAbove", "brokeAbove"})
 
 
 class VerdictRejected(Exception):
