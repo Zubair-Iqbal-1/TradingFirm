@@ -832,16 +832,26 @@ def test_rerun_reports_extension_and_ceiling_columns():
     assert row["zones"] == {"storedSupport": "47.80-48.10", "freshSupport": "47.80-48.10 (touches 3, held 2, broke 1)",
                             "storedResistance": "53.90-54.30",
                             "freshResistance": "53.90-54.30 (touches 5, held 4, broke 0)"}
-    # the ceiling column names the ceiling target itself, wherever it sits:
-    # 53.90 (held 1) is T1 at 1.95R and 56.90 (held 4, broke 0) is T2 and the ceiling
-    later = {**fresh, "zones": {**fresh["zones"], "resistance": [
-        zone(53.90, 54.30, touches=3, held=1, broke=1), zone(56.90, 57.30, touches=5, held=4, broke=0)]}}
-    t2 = rerun.rerun_row({"verdictId": "abc", "ticker": "Y", "entry": 50.0, "indicators": stored, "fresh": later},
-                         prev=None, account=100_000, risk_pct=1.0)["runs"][-1]
-    assert t2["t1"] == "53.90 (1.95R)" and t2["ceiling"] == "56.90"
     text = rerun.render([row])
     assert "| Y | 50.00 | fresh | v3 | swing low | 48.00 | 1.67 | 0 | 53.90 | 53.90 (1.95R) | no | 49.20 (2026-09-15) | yes | - |" in text
     assert "valid plans: v3 on stored 1 / 1; v3 on fresh, no swing 0 / 1; v3 on fresh 1 / 1" in text
     assert "| storedSupport | freshSupport | storedResistance | freshResistance |" in text
     for secret in ("size", "shares", "budget", "100000", "lossAtDisaster"):
         assert secret not in text, secret
+
+
+def test_rerun_ceiling_column_names_the_ceiling_target():
+    """0b4005e: the ceiling column is the ceiling target's own price, wherever
+    it sits — 53.90 (held 1) is T1 at 1.95R, 56.90 (held 4, broke 0) is T2
+    and the ceiling. The first build printed T1 whenever any target was one."""
+    from scripts import plan_math_rerun as rerun
+    fresh = {"atr14": 1.2, "ema20": 47.5, "lastSwingLow": {"price": 49.20, "date": "2026-09-15"},
+             "zones": {"support": [zone(47.80, 48.10, touches=3, held=2, broke=1)],
+                       "resistance": [zone(53.90, 54.30, touches=3, held=1, broke=1),
+                                      zone(56.90, 57.30, touches=5, held=4, broke=0)]}}
+    run = rerun.rerun_row({"verdictId": "abc", "ticker": "Y", "entry": 50.0, "indicators": fresh, "fresh": fresh},
+                          prev=None, account=100_000, risk_pct=1.0)["runs"][-1]
+    assert run["t1"] == "53.90 (1.95R)" and run["ceiling"] == "56.90"
+    assert "| 56.90 | 53.90 (1.95R) |" in rerun.render([rerun.rerun_row(
+        {"verdictId": "abc", "ticker": "Y", "entry": 50.0, "indicators": fresh, "fresh": fresh},
+        prev=None, account=100_000, risk_pct=1.0)])
