@@ -1164,3 +1164,13 @@ On all four pre-expiry nights the 00:15 reading sat at ES −0.85…−0.95 / NQ
 **Why:** the review's selection rerun over the eleven verdicts (fresh inputs from the stored bars, v3 valid): 3 by score 5 / 11 with OPCH, CNK and MSFT lost to selection alone; A = 6 by score 9 / 11; C = window-first 9 / 11; D = ATR merge on 6 by score 7 / 11; C+D 8 / 11. Under the first C+D the merge chained bands up to 0.86 ATR wide (RIOT 21.73–23.01, OPCH 22.97–23.54 at 0.84, GOOGL 346.14–351.37 at 0.65), which pushed GOOGL to `extended` by 0.09 ATR and OPCH's stop onto the EMA20 branch; the width cap holds every band on the eleven at ≤ 0.50 ATR. And OPCH's 24.52–24.96 wall — rejected on every approach from below since July — read `held 5 / broke 3` in total because the May fall through it counted against it, so it was no ceiling and C+D handed out T1 25.98 a dollar above it; on the split it reads below 6/1 (as 24.24–24.52 after the width cap) and 3/1 (24.70–24.96), both ceilings. The committed rule on the eleven: v3 5 / 11 valid, ceilings on OPCH (24.23–24.52, 0.38R), RIOT (25.17–25.86, 0.23R) and OUST 40.25 (47.95–48.38, 1.36R), GOOGL `extended` (its 348.92–351.37 support is looked through at 3 / 3 from above; EMA20 stop 336.07, wait for ≤ 352.25). Fewer plans, each against a level that has actually held from the trade's side.
 
 **Supersedes:** plan §1.6 (merge within 0.5 %, top 3 per side by score); 2026-09-23's "`top_n` 3 kept" and its side-agnostic-counts simplification (the totals remain, the split is what the rules read); spec 4.8a-de item 10 for this change.
+
+---
+
+## 2026-09-24 — After any experiment, rerun or table, the agent stops and waits for Zubair's explicit go before committing
+
+**Decision:** a table, rerun or experiment posted for review ends the agent's turn. The commit that follows it runs only on Zubair's own go for that commit, the same rule as a prod step (2026-09-23); a listed order ("then the commit"), a plan agreed earlier, or the word "then" in a message is not the word. One table, one wait, one word, then the commit.
+
+**Why:** the fixed C+D table of 2026-09-24 was to be posted and waited on; the agent read "then one commit with the variant" as leave to commit in the same turn, and `a46b239` landed before the table had been reviewed. The commit reconciled and stands (no force push), but the review happened after the fact.
+
+**Supersedes:** N/A (extends 2026-09-23's go-per-step rule from prod steps to commits that follow an experiment).
