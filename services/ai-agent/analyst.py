@@ -124,6 +124,13 @@ def _verdict_body(row: dict) -> dict:
     }
 
 
+def _stored_extras(row: dict) -> dict:
+    """4.8b-ai: what a cache hit answers for waitFor / contractWarnings —
+    the stored plan's, or nothing (a no-plan answer's waitFor is not stored)."""
+    plan = row.get("plan_proposed") if isinstance(row.get("plan_proposed"), dict) else {}
+    return {"waitFor": plan.get("waitFor"), "contractWarnings": plan.get("contractWarnings") or []}
+
+
 def _llm_status(error: LLMError) -> int:
     if isinstance(error, (LLMCapExceeded, LLMCooledDown, LLMRateLimited)):
         return 429
@@ -243,7 +250,7 @@ async def run(state, settings, ticker: str, horizon: str, entry: Optional[float]
             return {
                 **common, "cached": True, "stored": True, "verdictId": str(row["id"]),
                 "askedAt": row["asked_at"].isoformat(), "entry": float(row["entry"]),
-                "entrySource": row["entry_source"], "verdict": _verdict_body(row),
+                "entrySource": row["entry_source"], "verdict": _verdict_body(row), **_stored_extras(row),
                 "planRejection": row["plan_rejection"], "model": row["model"], "usage": {},
                 "servedCount": (row.get("served_count") or 0) + 1,
             }
@@ -266,7 +273,7 @@ async def run(state, settings, ticker: str, horizon: str, entry: Optional[float]
         try:
             result = await provider.complete_structured(
                 system, analyze.user_prompt(inputs),
-                analyze.llm_schema(has_plan, extended=has_plan and plan.extended),
+                analyze.llm_schema(),
                 label=analyze.LABEL, model=settings.llm_model,
                 cache_system=settings.llm_verdict_cache,
             )
@@ -290,7 +297,19 @@ async def run(state, settings, ticker: str, horizon: str, entry: Optional[float]
             logger.error(f"/analyze {ticker}: unusable verdict ({e})")
             raise AnalyzeError(502, f"VerdictRejected: {e}") from None
 
+        # 4.8b-ai: the soft checks — warnings on the response and, with a
+        # plan, inside plan_proposed; never a rejection. waitFor on a no-plan
+        # answer is returned and logged, not stored (approval change 6).
+        warnings = analyze.soft_checks(verdict, result.data, raised_flags=inputs["reads"]["flags"],
+                                       zones=analyze.tagged_zones(zones))
+        for warning in warnings:
+            logger.warning(f"/analyze {ticker}: contract warning: {warning}")
+        wait_for = analyze.wait_for_text(result.data)
         body = verdict.model_dump(by_alias=True)
+        if body["plan"] is not None:
+            body["plan"]["contractWarnings"] = warnings
+        elif wait_for is not None:
+            logger.info(f"/analyze {ticker}: waitFor on a no-plan answer (not stored): {wait_for}")
         _, rejection = analyze.plan_view(plan)
         record = {
             "user_id": user_id, "ticker": ticker, "horizon": horizon, "asked_at": now,
@@ -337,6 +356,7 @@ async def run(state, settings, ticker: str, horizon: str, entry: Optional[float]
             "askedAt": now.isoformat(), "entry": float(resolved), "entrySource": entry_source,
             "verdict": body, "planRejection": rejection, "model": result.model,
             "usage": result.usage, "servedCount": 0,
+            "waitFor": wait_for, "contractWarnings": warnings,
         }
     finally:
         await cache.release_analyze_lock(redis, suffix)

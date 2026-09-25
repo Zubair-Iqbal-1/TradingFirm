@@ -74,6 +74,12 @@ class Plan(BaseModel):
     earnings_in_days: Optional[int] = Field(default=None, ge=0, alias="earningsInDays")
     hold_through_earnings: bool = Field(default=False, alias="holdThroughEarnings")
     horizon_days: int = Field(ge=1, le=HORIZON_DAYS_MAX, alias="horizonDays")
+    # 4.8b-ai: on `wait`, what blocks `go` now and the level to wait for (a
+    # level the plan or the zone list printed, never the model's own — checked
+    # softly); the soft-check warnings the answer earned. Both optional so
+    # rows stored before 4.8b-ai still parse.
+    wait_for: Optional[Bullet] = Field(default=None, alias="waitFor")
+    contract_warnings: list[str] = Field(default_factory=list, alias="contractWarnings")
 
     @model_validator(mode="after")
     def _levels_ascend(self) -> "Plan":

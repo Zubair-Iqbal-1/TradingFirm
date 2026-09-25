@@ -92,7 +92,7 @@ class Provider:
     """Answers by label: `headline_classify` and `verdict`."""
 
     def __init__(self, verdict=None, raises=None, classify_raises=None):
-        self.verdict = verdict or GO
+        self.verdict = verdict or WAIT_PLAN
         self.raises, self.classify_raises = raises, classify_raises
         self.calls: list[dict] = []
 
@@ -112,11 +112,15 @@ class Provider:
                 usage={"input": 900, "output": 300, "cost": 0.0048})
         if self.raises is not None:
             raise self.raises
+        # 4.8b-ai: one schema for every call, so the stub answers what it was
+        # given; the fixture plan is extended, so the default is a wait with
+        # the plan fields filled (a `go` there is a rejection, tested as such).
+        # The default answer follows the document: with `plan: null` in the
+        # data block it answers the no-plan shape, as a model reading the
+        # prompt would.
         data = self.verdict
-        if data is GO and "go" not in schema["properties"]["verdict"]["enum"]:
-            # what strict decoding would force: no plan → the wait shape; an
-            # extended plan (4.8a-de) keeps its plan fields but loses `go`
-            data = {**GO, "verdict": "wait"} if "invalidation" in schema["properties"] else WAIT
+        if data is WAIT_PLAN and '"plan": null' in user:
+            data = WAIT
         return LLMResult(data=data, model=MODEL, finish_reason="stop", duration_ms=9,
                          usage={"input": 6100, "output": 900, "reasoning": 300,
                                 "cacheWrite": 1400, "cost": 0.0212}, host="Anthropic")
@@ -124,9 +128,13 @@ class Provider:
 
 GO = {"verdict": "go", "confidence": 62, "reasoning": "Because.", "thesis": ["a", "b", "c"],
       "thesisBreakers": ["x"], "riskFlags": ["earnings in 38 days"],
-      "invalidation": "daily close below the 20 EMA", "holdThroughEarnings": False, "horizonDays": 10}
-WAIT = {k: v for k, v in GO.items() if k not in ("invalidation", "holdThroughEarnings", "horizonDays")}
-WAIT["verdict"] = "wait"
+      "invalidation": "daily close below the 20 EMA", "holdThroughEarnings": False, "horizonDays": 10,
+      "waitFor": None}
+# the extended fixture plan: a wait, with the plan fields, naming a printed level
+WAIT_PLAN = {**GO, "verdict": "wait",
+             "waitFor": "A daily close back above the 20 EMA. Wait for price at entryForMaxRisk, 49.00."}
+# a no-plan answer under the single schema: the plan fields present and null
+WAIT = {**GO, "verdict": "wait", "invalidation": None, "holdThroughEarnings": None, "horizonDays": None}
 
 
 class Store(FakePool):
@@ -210,6 +218,11 @@ def test_analyze_returns_stores_and_ledgers_a_verdict(app):
     # dropped `go` and the fake provider answered `wait` with the plan
     assert plan["extended"] is True and plan["entryForMaxRisk"] == 49.0
     assert out["verdict"]["verdict"] == "wait"
+    # 4.8b-ai: waitFor stored with the plan, the soft checks clean (49.00 is a printed level)
+    assert plan["waitFor"] == WAIT_PLAN["waitFor"] and plan["contractWarnings"] == []
+    assert out["waitFor"] == WAIT_PLAN["waitFor"] and out["contractWarnings"] == []
+    assert state.provider.calls[-1]["schema"]["properties"]["verdict"]["enum"] == ["go", "wait", "avoid"]
+    assert "waitFor" in state.provider.calls[-1]["schema"]["properties"]
     assert plan["earningsInDays"] is not None and plan["invalidation"] == GO["invalidation"]
     assert out["regime"] == "CAUTIOUS" and out["macroStatus"] == "ok" and out["planRejection"] is None
 
@@ -448,6 +461,41 @@ def test_analyze_prefilters_before_the_classifier(app):
     assert out["classifier"]["classified"] == 14 and out["stored"] is True
 
 
+def test_contract_warnings_stored_and_returned(app):
+    """4.8b-ai decision 9: the soft checks reach the response and, with a
+    plan, plan_proposed; a cache hit answers the stored list; nothing is
+    rejected. `dead` fires on this section (move 0.1 ATR in a 2-ATR range)."""
+    world = World()
+    world.dossier["sections"]["indicators"]["momentumRead"] = {
+        "move30Atr": 0.1, "range30Atr": 2.0, "closesBelowEma20": 3, "lowerHighs": False}
+    noisy = {**WAIT_PLAN, "invalidation": "a close below 46.60", "waitFor": "Wait for 45.76 first."}
+    client, _, state = app(world=world, provider=Provider(verdict=noisy))
+    out = post(client).json()
+    assert out["stored"] is True and out["verdict"]["verdict"] == "wait"
+    expected = ["flag dead not cited in reasoning", "invalidation carries a number: 46.60",
+                "waitFor level 45.76 not in plan or zones"]
+    assert out["contractWarnings"] == expected and out["waitFor"] == "Wait for 45.76 first."
+    stored = json.loads(state.db_pool.row["plan_proposed"])
+    assert stored["contractWarnings"] == expected and stored["waitFor"] == "Wait for 45.76 first."
+    again = post(client).json()
+    assert again["cached"] is True and again["contractWarnings"] == expected
+    assert again["waitFor"] == "Wait for 45.76 first."
+
+
+def test_wait_for_allowed_without_plan_not_stored(app):
+    """Approval change 6: waitFor on a no-plan answer is returned and logged,
+    never a rejection and never stored (plan_proposed is null)."""
+    world = World()
+    world.dossier = dossier(zones=ZONES[:2], close=60.0)                    # no target: no plan
+    text = "A daily close back above the 20 EMA. Wait for a pullback to the 47.80 zone."
+    client, _, state = app(world=world, provider=Provider(verdict={**WAIT, "waitFor": text}))
+    out = post(client).json()
+    assert out["stored"] is True and out["verdict"]["plan"] is None
+    assert out["waitFor"] == text and out["contractWarnings"] == []
+    assert state.db_pool.row["plan_proposed"] is None
+    assert post(client).json()["waitFor"] is None, "a cache hit has nothing stored to answer"
+
+
 def test_item_without_id_skips_writeback(app):
     world = World()
     world.dossier = dossier(news=[news_item(0, with_id=False), news_item(1)])
@@ -486,15 +534,18 @@ def test_ath_no_target_passes_through_as_wait(app):
     assert out["planRejection"]["reason"] == "no_target"
     assert out["verdict"]["riskFlags"][0] == "no plan: no_target"
     schema = state.provider.calls[0]["schema"]
-    assert schema["properties"]["verdict"]["enum"] == ["wait", "avoid"]
+    assert schema["properties"]["verdict"]["enum"] == ["go", "wait", "avoid"], "one schema (4.8b-ai)"
     assert json.loads(state.db_pool.row["plan_rejection"])["reason"] == "no_target"
     assert state.db_pool.row["plan_proposed"] is None
+    assert out["waitFor"] is None and out["contractWarnings"] == []
 
 
 @pytest.mark.parametrize("answer", [
     dict(GO),                                               # `go` although the plan was rejected
+    {**WAIT, "verdict": "go"},                              # the same with the plan fields null
     {**WAIT, "thesis": ["only", "two"]},
     {**WAIT, "confidence": 140},
+    {**WAIT, "invalidation": "a plan field on a no-plan answer"},
 ])
 def test_bad_verdict_answer_is_502_and_stores_nothing(app, answer):
     world = World()

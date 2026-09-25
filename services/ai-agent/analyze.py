@@ -327,28 +327,35 @@ def prompt_sha(system: str) -> str:
     return hashlib.sha256(system.encode("utf-8")).hexdigest()[:16]
 
 
-def llm_schema(has_plan: bool, extended: bool = False) -> dict:
+# The three fields the model fills only when a plan exists (4.4); `waitFor`
+# (4.8b-ai) is accepted on any answer.
+PLAN_ONLY_FIELDS = ("invalidation", "holdThroughEarnings", "horizonDays")
+WAIT_FOR_MAX = 300
+
+
+def llm_schema() -> dict:
     """The strict structured-output schema, derived from models.verdict:
     every field required, no extras, and **no price, R or size anywhere**.
-    Without a plan the enum has no `go` and the three plan fields are gone,
-    so rule 3 of the prompt is enforced by the decoder, not by hope. An
-    extended plan (4.8a-de) keeps its fields but loses `go` the same way."""
+    One schema for every call (Part 4.8b-ai, spec 4.8b decision 8): the
+    verdict enum always carries `go`, and the plan fields are present and
+    nullable. What the decoder no longer forbids — `go` without a plan, `go`
+    on an extended plan, a plan field on a no-plan answer, a null plan field
+    with a plan — `merge` rejects whole. One cached prefix per prompt_sha
+    instead of three."""
     text = {"type": "string"}
-    can_go = has_plan and not extended
+    nullable_text = {"type": ["string", "null"]}
     properties: dict[str, Any] = {
-        "verdict": {"type": "string", "enum": ["go", "wait", "avoid"] if can_go else ["wait", "avoid"]},
+        "verdict": {"type": "string", "enum": ["go", "wait", "avoid"]},
         "confidence": {"type": "integer"},
         "reasoning": text,
         "thesis": {"type": "array", "items": text},
         "thesisBreakers": {"type": "array", "items": text},
         "riskFlags": {"type": "array", "items": text},
+        "invalidation": nullable_text,
+        "holdThroughEarnings": {"type": ["boolean", "null"]},
+        "horizonDays": {"type": ["integer", "null"]},
+        "waitFor": nullable_text,
     }
-    if has_plan:
-        properties.update(
-            invalidation=text,
-            holdThroughEarnings={"type": "boolean"},
-            horizonDays={"type": "integer"},
-        )
     return {
         "type": "object",
         "additionalProperties": False,
@@ -439,6 +446,21 @@ def _words(text: str) -> list[str]:
     return re.sub(r"[^a-z0-9]+", " ", text.lower()).split()
 
 
+def _blank(value: Any) -> bool:
+    """None, or a string with nothing in it: what a nullable text field reads
+    as "not given" under the single schema."""
+    return value is None or (isinstance(value, str) and not value.strip())
+
+
+def wait_for_text(answer: dict) -> Optional[str]:
+    """`waitFor` as accepted on any answer (approval change 6): None when
+    blank, else the text trimmed at WAIT_FOR_MAX (the one repair allowed)."""
+    value = answer.get("waitFor") if isinstance(answer, dict) else None
+    if _blank(value):
+        return None
+    return _text(value, WAIT_FOR_MAX, "waitFor")
+
+
 def _echoes_no_plan(flag: str, reason: str) -> bool:
     """True for a model-written flag that only restates the code's
     `no plan: <reason>`: it talks about the plan and either says "no plan"
@@ -478,14 +500,25 @@ def merge(answer: dict, plan: Union[PlanMath, PlanRejected], earnings_in_days: O
             "earningsInDays": earnings_in_days,
             "holdThroughEarnings": answer.get("holdThroughEarnings"),
             "horizonDays": answer.get("horizonDays"),
+            # 4.8b-ai: stored with the plan; the route fills contractWarnings
+            # on the dumped body after soft_checks
+            "waitFor": wait_for_text(answer),
         }
         if not isinstance(plan_json["holdThroughEarnings"], bool):
             raise VerdictRejected("holdThroughEarnings is not a boolean")
+        if plan_json["horizonDays"] is None:
+            raise VerdictRejected("horizonDays is null on an answer with a plan")
         if plan.extended and answer.get("verdict") == "go":
             raise VerdictRejected("go on an extended plan")
     else:
         if answer.get("verdict") == "go":
             raise VerdictRejected("go without a plan")
+        # 4.8b-ai: one schema for every call, so the plan fields arrive on a
+        # no-plan answer too — as null. A value there is a contract break;
+        # `waitFor` is not one of them (accepted on any answer, not stored).
+        for name in PLAN_ONLY_FIELDS:
+            if not _blank(answer.get(name)):
+                raise VerdictRejected(f"{name} on an answer without a plan")
         # The code owns this flag (the prompt says so). A model that adds its
         # own anyway ("no_plan_low_r", "plan_null_low_r") is not shown twice.
         flags = [f"no plan: {plan.reason}"] + [f for f in flags if not _echoes_no_plan(f, plan.reason)]
@@ -507,3 +540,59 @@ def merge(answer: dict, plan: Union[PlanMath, PlanRejected], earnings_in_days: O
     except ValidationError as e:
         problems = "; ".join(f"{'.'.join(str(p) for p in err['loc'])}: {err['type']}" for err in e.errors()[:5])
         raise VerdictRejected(f"answer breaks the verdict contract ({problems})") from None
+
+
+# ── Soft checks: warnings, never a rejection (4.8b-ai, spec decision 9) ──
+
+NUMBER_RE = re.compile(r"\$?\d+\.\d+|\$\d+")
+
+
+def _cents(value: str) -> Decimal:
+    return Decimal(value.lstrip("$")).quantize(CENT, rounding=ROUND_HALF_UP)
+
+
+def known_levels(verdict: Verdict, zones: list) -> set[Decimal]:
+    """Every level the model was shown, to the cent: the plan's entry, stop,
+    disaster line, entryForMaxRisk, targets and overhead, and each zone's
+    low, high and price. A number in `waitFor` must be one of these."""
+    levels: set[Decimal] = set()
+    plan = verdict.plan
+    if plan is not None:
+        for value in (plan.entry, plan.stop, plan.disaster_line, plan.entry_for_max_risk,
+                      *(t.price for t in plan.targets), *(t.price for t in plan.overhead)):
+            if value is not None:
+                levels.add(_cents(str(value)))
+    for zone in zones or []:
+        if not isinstance(zone, dict):
+            continue
+        for key in ("low", "high", "price"):
+            value = zone.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
+                levels.add(_cents(str(value)))
+    return levels
+
+
+def soft_checks(verdict: Verdict, answer: dict, *, raised_flags: list[str], zones: list) -> list[str]:
+    """Four rules a paid answer should not be thrown away over, reported and
+    never repaired: an uncited raised flag; a number in `invalidation`; a
+    blank `waitFor` on `wait` with a plan; a level in `waitFor` that is in
+    neither the plan nor the zone list. Each is one string for
+    `contractWarnings` (logged by the route, stored with a plan)."""
+    warnings: list[str] = []
+    reasoning = verdict.reasoning or ""
+    for name in raised_flags or []:
+        if not isinstance(name, str) or not re.search(rf"\b{re.escape(name)}\b", reasoning, re.IGNORECASE):
+            warnings.append(f"flag {name} not cited in reasoning")
+    if verdict.plan is not None:
+        found = NUMBER_RE.findall(verdict.plan.invalidation or "")
+        if found:
+            warnings.append(f"invalidation carries a number: {found[0]}")
+    wait_for = wait_for_text(answer if isinstance(answer, dict) else {})
+    if verdict.plan is not None and verdict.verdict == "wait" and wait_for is None:
+        warnings.append("waitFor blank on wait with a plan")
+    if wait_for is not None:
+        levels = known_levels(verdict, zones)
+        for raw in NUMBER_RE.findall(wait_for):
+            if _cents(raw) not in levels:
+                warnings.append(f"waitFor level {raw.lstrip('$')} not in plan or zones")
+    return warnings

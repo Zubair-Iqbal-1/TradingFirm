@@ -83,7 +83,12 @@ MACRO = {"status": "ok", "regime": "CAUTIOUS", "score": 66, "brief": None, "brie
 ANSWER = {"verdict": "wait", "confidence": 62, "reasoning": "Because.",
           "thesis": ["a", "b", "c"], "thesisBreakers": ["x"], "riskFlags": ["earnings in 38 days"],
           "invalidation": "daily close below the 20 EMA", "holdThroughEarnings": False,
-          "horizonDays": 10}
+          "horizonDays": 10,
+          # 4.8b-ai: two sentences, the level a printed one (entryForMaxRisk 49.00)
+          "waitFor": "A daily close back above the 20 EMA. Wait for price at entryForMaxRisk, 49.00."}
+# a no-plan answer under the single schema: the plan fields present and null
+NO_PLAN_ANSWER = {**ANSWER, "invalidation": None, "holdThroughEarnings": None, "horizonDays": None,
+                  "waitFor": None}
 
 
 def inputs(news_events=None, plan=None):
@@ -160,8 +165,7 @@ def test_plan_view_carries_overhead():
     assert [o["price"] for o in merged["overhead"]] == [53.9]
     assert merged["targets"][0]["basis"] == "T1 56.90: resistance 56.90-57.30"
     assert merged["lossAtDisasterPct"] == 1.34
-    for has_plan in (True, False):
-        assert "overhead" not in analyze.llm_schema(has_plan)["properties"]
+    assert "overhead" not in analyze.llm_schema()["properties"]
 
 
 def test_plan_view_carries_extension():
@@ -173,17 +177,23 @@ def test_plan_view_carries_extension():
     assert view["extended"] is False and view["entryForMaxRisk"] is None
     merged = analyze.merge(ANSWER, plan_a(), 38).model_dump(by_alias=True)["plan"]
     assert merged["extended"] is True and merged["entryForMaxRisk"] == 49.0
-    for has_plan in (True, False):
-        for extended in (True, False):
-            assert not {"extended", "entryForMaxRisk"} & set(analyze.llm_schema(has_plan, extended)["properties"])
+    assert not {"extended", "entryForMaxRisk"} & set(analyze.llm_schema()["properties"])
 
 
-def test_llm_schema_drops_go_when_extended():
-    assert analyze.llm_schema(True, extended=False)["properties"]["verdict"]["enum"] == ["go", "wait", "avoid"]
-    extended = analyze.llm_schema(True, extended=True)
-    assert extended["properties"]["verdict"]["enum"] == ["wait", "avoid"]
-    assert "invalidation" in extended["properties"], "the plan fields stay: only go is gone"
-    assert analyze.llm_schema(False, extended=True)["properties"]["verdict"]["enum"] == ["wait", "avoid"]
+def test_llm_schema_is_one_schema():
+    """4.8b-ai (spec 4.8b decision 8): one schema for every call — `go`
+    always in the enum, the plan fields always present and nullable — so one
+    cached prefix per prompt_sha instead of three."""
+    schema = analyze.llm_schema()
+    assert schema["properties"]["verdict"]["enum"] == ["go", "wait", "avoid"]
+    for name in ("invalidation", "waitFor"):
+        assert schema["properties"][name] == {"type": ["string", "null"]}
+    assert schema["properties"]["holdThroughEarnings"] == {"type": ["boolean", "null"]}
+    assert schema["properties"]["horizonDays"] == {"type": ["integer", "null"]}
+    assert schema["required"] == list(schema["properties"])
+    assert analyze.llm_schema() == schema, "no argument changes it"
+    with pytest.raises(TypeError):
+        analyze.llm_schema(True)          # the old per-plan form is gone
 
 
 def test_merge_refuses_go_on_extended_plan():
@@ -192,6 +202,51 @@ def test_merge_refuses_go_on_extended_plan():
         analyze.merge(go, plan_a(), 38)
     assert analyze.merge(go, plan_near(), 38).verdict == "go"
     assert analyze.merge(ANSWER, plan_a(), 38).verdict == "wait"
+
+
+def test_merge_refuses_go_without_plan():
+    """The decoder no longer forbids it; merge does, whole (the assertion
+    that lived in test_plan_rejection_passes_through_as_wait_reason)."""
+    with pytest.raises(analyze.VerdictRejected, match="go without a plan"):
+        analyze.merge({**NO_PLAN_ANSWER, "verdict": "go"}, PlanRejected("low_r", "d"), None)
+
+
+@pytest.mark.parametrize("field, value", [
+    ("invalidation", "a close below the 20 EMA"), ("holdThroughEarnings", False),
+    ("holdThroughEarnings", True), ("horizonDays", 10),
+])
+def test_merge_refuses_plan_fields_without_plan(field, value):
+    """The three plan fields, not waitFor (approval change 6)."""
+    with pytest.raises(analyze.VerdictRejected, match=f"{field} on an answer without a plan"):
+        analyze.merge({**NO_PLAN_ANSWER, field: value}, PlanRejected("low_r", "d"), None)
+    blank = analyze.merge({**NO_PLAN_ANSWER, "invalidation": "  "}, PlanRejected("low_r", "d"), None)
+    assert blank.plan is None, "a blank string reads as null"
+
+
+@pytest.mark.parametrize("field", ["invalidation", "holdThroughEarnings", "horizonDays"])
+def test_merge_refuses_null_plan_fields_with_plan(field):
+    with pytest.raises(analyze.VerdictRejected):
+        analyze.merge({**ANSWER, field: None}, plan_a(), 38)
+
+
+def test_wait_for_is_stored_in_plan_proposed():
+    merged = analyze.merge(ANSWER, plan_a(), 38).model_dump(by_alias=True)["plan"]
+    assert merged["waitFor"] == ANSWER["waitFor"] and merged["contractWarnings"] == []
+    none = analyze.merge({**ANSWER, "verdict": "avoid", "waitFor": None}, plan_a(), 38)
+    assert none.plan.wait_for is None
+    blank = analyze.merge({**ANSWER, "waitFor": "   "}, plan_a(), 38)
+    assert blank.plan.wait_for is None, "blank reads as null; the soft check reports it"
+
+
+def test_wait_for_allowed_without_plan_not_stored():
+    """Approval change 6: accepted on a no-plan answer, never a rejection;
+    the verdict carries no plan to store it in, so the route returns it."""
+    answer = {**NO_PLAN_ANSWER, "waitFor": "A close back above the 20 EMA. Wait for the 47.80 zone."}
+    verdict = analyze.merge(answer, PlanRejected("low_r", "d"), None)
+    assert verdict.plan is None and "waitFor" not in verdict.model_dump(by_alias=True)
+    assert analyze.wait_for_text(answer) == answer["waitFor"]
+    assert analyze.wait_for_text({**answer, "waitFor": ""}) is None
+    assert len(analyze.wait_for_text({**answer, "waitFor": "w" * 500})) == 300, "trimmed at its cap"
 
 
 def test_prompt_names_extension_legend():
@@ -440,20 +495,20 @@ def test_injected_headline_cannot_change_levels():
 
 
 def test_llm_schema_has_no_number_the_model_could_set():
-    for has_plan in (True, False):
-        schema = analyze.llm_schema(has_plan)
-        validate_request("s", "u", schema, analyze.LABEL)
-        assert schema["additionalProperties"] is False
-        assert schema["required"] == list(schema["properties"]), "strict: every field required"
-        names = set(schema["properties"])
-        assert not names & {"entry", "stop", "disasterLine", "targets", "overhead", "basis",
-                            "lossAtDisasterPct", "sizeShares", "plan", "price", "r"}
-        numeric = {k for k, v in schema["properties"].items() if v["type"] in ("number", "integer")}
-        assert numeric <= {"confidence", "horizonDays"}
-    assert analyze.llm_schema(True)["properties"]["verdict"]["enum"] == ["go", "wait", "avoid"]
-    no_plan = analyze.llm_schema(False)
-    assert no_plan["properties"]["verdict"]["enum"] == ["wait", "avoid"]
-    assert "invalidation" not in no_plan["properties"]
+    schema = analyze.llm_schema()
+    validate_request("s", "u", schema, analyze.LABEL)
+    assert schema["additionalProperties"] is False
+    assert schema["required"] == list(schema["properties"]), "strict: every field required"
+    names = set(schema["properties"])
+    assert not names & {"entry", "stop", "disasterLine", "targets", "overhead", "basis",
+                        "lossAtDisasterPct", "sizeShares", "plan", "price", "r", "entryForMaxRisk"}
+
+    def types(v):
+        t = v["type"]
+        return set(t) if isinstance(t, list) else {t}
+    numeric = {k for k, v in schema["properties"].items() if types(v) & {"number", "integer"}}
+    assert numeric <= {"confidence", "horizonDays"}
+    assert types(schema["properties"]["waitFor"]) == {"string", "null"}, "waitFor is text"
 
 
 def test_verdict_prompt_ships_and_states_the_rules():
@@ -475,15 +530,10 @@ def test_plan_rejection_passes_through_as_wait_reason(reason):
     """Incl. the ATH gap (`no_target`): no synthetic target, the rejection is
     the reason."""
     rejected = PlanRejected(reason, "detail")
-    answer = {k: v for k, v in ANSWER.items()
-              if k not in ("invalidation", "holdThroughEarnings", "horizonDays")}
-    verdict = analyze.merge({**answer, "verdict": "wait"}, rejected, None)
+    verdict = analyze.merge({**NO_PLAN_ANSWER, "verdict": "wait"}, rejected, None)
     assert verdict.verdict == "wait" and verdict.plan is None
     assert verdict.risk_flags[0] == f"no plan: {reason}"
     assert analyze.plan_view(rejected) == (None, {"reason": reason, "detail": "detail"})
-
-    with pytest.raises(analyze.VerdictRejected, match="go without a plan"):
-        analyze.merge({**answer, "verdict": "go"}, rejected, None)
 
 
 @pytest.mark.parametrize("change", [
@@ -501,11 +551,74 @@ def test_answer_breaking_the_contract_is_rejected(change):
 
 
 def test_over_long_strings_are_trimmed_not_rejected(caplog):
-    long = {**ANSWER, "reasoning": "r" * 2500, "thesis": ["t" * 400, "b", "c"], "riskFlags": ["f" * 150]}
+    long = {**ANSWER, "reasoning": "r" * 2500, "thesis": ["t" * 400, "b", "c"], "riskFlags": ["f" * 150],
+            "waitFor": "w" * 500}
     with caplog.at_level("WARNING"):
         verdict = analyze.merge(long, plan_a(), 38)
     assert len(verdict.reasoning) == 2000 and len(verdict.thesis[0]) == 300
     assert len(verdict.risk_flags[0]) == 100 and "trimmed" in caplog.text
+    assert len(verdict.plan.wait_for) == 300
+
+
+# ── Soft checks (4.8b-ai, spec decision 9) ───────────────────────
+
+def checks(answer, plan=None, flags=(), zones=None):
+    verdict = analyze.merge(answer, plan or plan_a(), 38)
+    return analyze.soft_checks(verdict, answer, raised_flags=list(flags),
+                               zones=analyze.tagged_zones(zones if zones is not None else
+                                                          {"support": ZONES[:2], "resistance": ZONES[2:]}))
+
+
+def test_uncited_flag_warns_not_rejects():
+    assert checks(ANSWER, flags=["dead", "rangeBound"]) == ["flag dead not cited in reasoning",
+                                                            "flag rangeBound not cited in reasoning"]
+    cited = {**ANSWER, "reasoning": "The stock reads dead (0.2 ATR in 30 bars) and RANGEBOUND, so wait."}
+    assert checks(cited, flags=["dead", "rangeBound"]) == [], "by name, case-insensitive"
+    partial = {**ANSWER, "reasoning": "It is deadly quiet."}
+    assert checks(partial, flags=["dead"]) == ["flag dead not cited in reasoning"], "a whole word"
+
+
+def test_price_in_invalidation_warns():
+    assert checks({**ANSWER, "invalidation": "a daily close below 13.33"}) == \
+        ["invalidation carries a number: 13.33"]
+    assert checks({**ANSWER, "invalidation": "a close under $46"}) == ["invalidation carries a number: $46"]
+
+
+def test_ema_period_in_invalidation_passes():
+    for text in ("daily close below the 20 EMA", "RSI 40 lost", "two closes under the 50 EMA"):
+        assert checks({**ANSWER, "invalidation": text}) == [], text
+
+
+def test_blank_wait_for_warns():
+    assert checks({**ANSWER, "waitFor": None}) == ["waitFor blank on wait with a plan"]
+    assert checks({**ANSWER, "waitFor": "  "}) == ["waitFor blank on wait with a plan"]
+    assert checks({**ANSWER, "verdict": "avoid", "waitFor": None}) == [], "only on wait"
+    no_plan = analyze.merge(NO_PLAN_ANSWER, PlanRejected("low_r", "d"), None)
+    assert analyze.soft_checks(no_plan, NO_PLAN_ANSWER, raised_flags=[], zones=[]) == [], "only with a plan"
+
+
+def test_wait_for_level_not_in_plan_warns():
+    assert checks({**ANSWER, "waitFor": "A close above the 20 EMA. Wait for 45.76."}) == \
+        ["waitFor level 45.76 not in plan or zones"]
+    two = checks({**ANSWER, "waitFor": "Wait for $48.00 or 49.10."})
+    assert two == ["waitFor level 48.00 not in plan or zones", "waitFor level 49.10 not in plan or zones"]
+    assert checks({**ANSWER, "waitFor": "Wait for 49.001."}) == [], "compared to the cent"
+    # no plan: only the zone list counts
+    no_plan = analyze.merge({**NO_PLAN_ANSWER, "waitFor": "Wait for 49.00."}, PlanRejected("low_r", "d"), None)
+    assert analyze.soft_checks(no_plan, {**NO_PLAN_ANSWER, "waitFor": "Wait for 49.00."}, raised_flags=[],
+                               zones=analyze.tagged_zones({"support": ZONES[:2]})) == \
+        ["waitFor level 49.00 not in plan or zones"]
+
+
+def test_wait_for_level_from_plan_passes():
+    for text in ("Wait for price at entryForMaxRisk, 49.00.",          # plan level
+                 "Wait for a pullback into the 47.80 zone.",            # a zone edge
+                 "Wait for a close over 53.90, the overhead.",          # overhead price
+                 "Wait for the stop area near $46.60.",                 # the stop, dollar sign
+                 "Wait for a daily close back above the 20 EMA."):      # no number at all
+        assert checks({**ANSWER, "waitFor": text}) == [], text
+    assert analyze.known_levels(analyze.merge(ANSWER, plan_a(), 38), analyze.tagged_zones(
+        {"support": ZONES[:2], "resistance": ZONES[2:]})) >= {Decimal("49.00"), Decimal("47.80"), Decimal("56.90")}
 
 
 # ── Fingerprint ──────────────────────────────────────────────────
@@ -558,16 +671,14 @@ def test_price_move_of_one_atr_invalidates():
                                   "no plan available", "plan rejected (low_r)"])
 def test_model_no_plan_flag_is_not_duplicated(echo):
     """Both live AAPL answers carried one beside the code's."""
-    answer = {k: v for k, v in ANSWER.items()
-              if k not in ("invalidation", "holdThroughEarnings", "horizonDays")}
+    answer = dict(NO_PLAN_ANSWER)
     answer.update(verdict="avoid", riskFlags=[echo, "earnings_in_hold_window", "regime_cautious"])
     verdict = analyze.merge(answer, PlanRejected("low_r", "best R 0.19 < 1.5"), 37)
     assert verdict.risk_flags == ["no plan: low_r", "earnings_in_hold_window", "regime_cautious"]
 
 
 def test_other_flags_about_the_plan_are_kept():
-    answer = {k: v for k, v in ANSWER.items()
-              if k not in ("invalidation", "holdThroughEarnings", "horizonDays")}
+    answer = dict(NO_PLAN_ANSWER)
     answer.update(verdict="wait", riskFlags=["plan needs a pullback to support", "low_relevance_news"])
     verdict = analyze.merge(answer, PlanRejected("low_r", "d"), None)
     assert verdict.risk_flags == ["no plan: low_r", "plan needs a pullback to support",

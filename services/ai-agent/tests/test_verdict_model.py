@@ -28,6 +28,9 @@ def plan_json(**over):
         "earningsInDays": 12,
         "holdThroughEarnings": False,
         "horizonDays": 10,
+        # 4.8b-ai: both optional, so rows stored before it still parse
+        "waitFor": None,
+        "contractWarnings": [],
     }
     body.update(over)
     return body
@@ -78,9 +81,11 @@ def test_snake_case_names_accepted_too():
 def test_plan_defaults():
     body = plan_json()
     del body["earningsInDays"], body["holdThroughEarnings"]
+    del body["waitFor"], body["contractWarnings"]                 # a row stored before 4.8b-ai
     p = Plan.model_validate(body)
     assert p.earnings_in_days is None
     assert p.hold_through_earnings is False
+    assert p.wait_for is None and p.contract_warnings == []
     v = verdict_json(verdict="avoid")
     del v["plan"], v["riskFlags"]
     parsed = Verdict.model_validate(v)
