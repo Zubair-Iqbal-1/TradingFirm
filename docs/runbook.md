@@ -169,6 +169,16 @@ A change takes effect on the next analyze: account size and risk % are part of t
 
 If Postgres fails after the model answered, `/analyze` still returns the verdict with `stored: false`, and `tf-ai-agent` logs one ERROR line starting `VERDICT NOT STORED`, followed by a JSON payload `{"verdict": {...}, "llmCall": {...}}`. Its keys are the columns of `ai.verdicts` and `ai.llm_calls`. To backfill (D5: every verdict is stored): insert the `verdict` object into `ai.verdicts`, take the returned `id`, and insert `llmCall` into `ai.llm_calls` with that `verdict_id`. `GET /usage` shows `ledgerMissedToday > 0` on a day this happened.
 
+### The classifier knob test (Part 4.8b-ai)
+
+`tests/classify_compare_live.py` sends the same pre-filtered headlines (≤ 15 a ticker) once to `anthropic/claude-sonnet-5` and once to `anthropic/claude-haiku-4.5`, and prints the cost and agreement tables (relevance, category, `eventDate`, event grouping, the headlines where the two differ). Paid: six calls for three tickers, about $0.087; each writes an `ai.llm_calls` row labelled `headline_classify_compare`, no classification cache, no write-back. It refuses without a key, on the twin, or with fewer than 6 classifier calls left today. Prod container only, after a go, for the tickers Zubair names:
+
+```bash
+docker exec tf-ai-agent python3 tests/classify_compare_live.py OPCH RIOT AAL
+```
+
+Switching the prod classifier (`LLM_MODEL_CLASSIFIER` in `.env` + `up -d ai-agent`) is a separate go after the table.
+
 ## Plan math version (Part 4.8a)
 
 `ai.verdicts.plan_math_version` names the `grading/plan_math.py` rules a row was built with. **NULL means 1**: every row before 4.8a (migration 009 adds the column and backfills nothing; `db.journal_rows` reads `COALESCE(plan_math_version, 1)`). `GET /journal/stats` never averages two versions. Bump `PLAN_MATH_VERSION` on any rule change.

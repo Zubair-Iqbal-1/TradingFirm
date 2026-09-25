@@ -532,6 +532,75 @@ async def test_classifier_system_prompt_has_no_request_data():
     assert "Unique headline zq7" in p.calls[1]["user"] and "zq7-story" in p.calls[1]["user"]
 
 
+# ── The knob script (4.8b-ai, spec decision 13) ──────────────────
+
+@pytest.mark.asyncio
+async def test_compare_script_refuses_without_key(monkeypatch):
+    """The live script imported, never run: preflight refuses on the twin's
+    empty key (and on the .invalid URL, and under 6 remaining calls) before
+    any call; a stubbed run makes exactly two _call_model calls per ticker,
+    touches no classification-cache key, writes no label back, and writes
+    one ledger row per call with the compare label."""
+    import httpx
+
+    from tests import classify_compare_live as script
+    from tests.fake_pool import FakePool
+
+    assert script.settings.llm_configured is False
+    with pytest.raises(SystemExit) as stop:
+        script.preflight()
+    assert stop.value.code == 2
+    monkeypatch.setattr(script.settings, "llm_api_key", __import__("pydantic").SecretStr("k"))
+    monkeypatch.setattr(script.settings, "llm_base_url", "https://openrouter.ai/api/v1")
+    monkeypatch.setattr(script.settings, "llm_classifier_daily_call_cap", 40)
+    with pytest.raises(SystemExit):
+        script.preflight(budget=5)                                   # 34 spent: refused
+    script.preflight(budget=6)                                       # exactly six left: allowed
+    assert script.MIN_BUDGET == 6 and script.LABEL == "headline_classify_compare"
+
+    # a stubbed run: the dossier over a MockTransport, a stub provider
+    r = FakeRedis()
+    dossier = {"ticker": "OPCH", "horizon": "swing", "asOf": "2026-09-24T00:00:00Z", "sections": {
+        "indicators": {"status": "ok", "close": 24.0, "atr14": 0.7, "zones": {}},
+        "news": {"status": "ok", "items": [
+            {"id": 1, "headline": "Option Care raises guidance", "url": "https://x/1", "source": "Reuters",
+             "publishedAt": "2026-09-24T13:00:00Z", "summary": "s", "sentiment": None},
+            {"id": 2, "headline": "Is OPCH a buy?", "url": "https://x/2", "source": "Yahoo",
+             "publishedAt": "2026-09-23T13:00:00Z", "summary": "Zacks", "sentiment": {"relevance": "low"}},
+            {"id": 3, "headline": "Retold", "url": "https://x/3", "source": "Yahoo",
+             "publishedAt": "2026-09-22T13:00:00Z", "summary": None, "sentiment": None,
+             "rehashOf": {"id": 9, "publishedAt": "2026-08-01T00:00:00Z", "overlapFrac": 0.6}},
+        ]}}}
+    requests = []
+
+    def handler(request):
+        requests.append((request.method, request.url.path))
+        return httpx.Response(200, json=dossier)
+
+    p = StubProvider(answer(2), answer(2, model="anthropic/claude-haiku-4.5"))
+    pool = FakePool()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        report = await script.compare_ticker(
+            "OPCH", http=http, provider=p, redis=r, pool=pool, memory_cap=cache.MemoryCap(),
+            memory_cost=cache.MemoryCost(), cap=40, now=NOON)
+    assert [t["title"] for t in report["headlines"]] == ["Option Care raises guidance", "Is OPCH a buy?"]
+    assert report["prefiltered"] == 1, "the rehash was cut; the labelled question is still sent"
+    assert [c["model"] for c in p.calls] == list(script.MODELS) and all(
+        c["cache_system"] is False and c["label"] == classifier.LABEL for c in p.calls)
+    assert requests == [("GET", "/dossier/OPCH")], "one dossier read, no write-back"
+    assert not any(k.startswith(cache.CLASSIFY_PREFIX) for k in r.store), "no classification cache"
+    rows = [dict(zip(__import__("db").LLM_CALL_COLUMNS, c[2])) for c in pool.statements("INSERT INTO ai.llm_calls")]
+    assert [(row["label"], row["route"], row["model"], row["outcome"]) for row in rows] == [
+        ("headline_classify_compare", "classify", MODEL, "ok"),
+        ("headline_classify_compare", "classify", "anthropic/claude-haiku-4.5", "ok")]
+    assert int(r.store[cache.day_counter_key(NOON, name=cache.STATE_CLASSIFIER_CALLS)]) == 2
+    agree = script.agreement(report["results"][MODEL]["answers"],
+                             report["results"]["anthropic/claude-haiku-4.5"]["answers"])
+    assert agree == {"items": 2, "relevance": 2, "category": 2, "eventDate": 2,
+                     "eventGroupingPairs": "0 / 0", "differ": []}
+    assert script.print_report(report) == pytest.approx(0.0114)
+
+
 def test_event_key_bounds_accepted():
     for key in ("a-b", "nvda-q3-guidance-cut", "a-b-c-d-e-f-g-h", "a-" + "b" * 78):
         out = classifier.validate_answer({"items": [{**GOOD, "eventKey": key}]}, 1)

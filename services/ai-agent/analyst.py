@@ -61,6 +61,18 @@ def _unlabelled(items: list[dict]) -> list[dict]:
             and isinstance(i.get("headline"), str) and i["headline"].strip()]
 
 
+def headline_payload(items: list[dict], ticker: str) -> list[dict]:
+    """Dossier news items as the classifier's headline dicts. One function
+    for the route and the knob script (tests/classify_compare_live.py), so
+    both send the same thing (4.8b-ai)."""
+    return [{
+        "id": i.get("id") if isinstance(i.get("id"), int) else None,
+        "title": str(i.get("headline") or "")[:classifier.TITLE_MAX].replace("\x00", " "),
+        "url": i.get("url"), "source": i.get("source"),
+        "publishedAt": i.get("publishedAt"), "summary": i.get("summary"), "ticker": ticker,
+    } for i in items if isinstance(i, dict) and isinstance(i.get("headline"), str) and i["headline"].strip()]
+
+
 async def _classify_news(state, settings, ticker: str, user_id: str, items: list[dict], now,
                          known_from: Optional[list[dict]] = None) -> dict:
     """Label the ticker's unlabelled headlines through 4.2's classifier,
@@ -76,12 +88,7 @@ async def _classify_news(state, settings, ticker: str, user_id: str, items: list
     if not todo:
         return summary
 
-    headlines = [{
-        "id": i.get("id") if isinstance(i.get("id"), int) else None,
-        "title": i["headline"][:classifier.TITLE_MAX].replace("\x00", " "),
-        "url": i.get("url"), "source": i.get("source"),
-        "publishedAt": i.get("publishedAt"), "summary": i.get("summary"), "ticker": ticker,
-    } for i in todo]
+    headlines = headline_payload(todo, ticker)
     pool, redis = getattr(state, "db_pool", None), getattr(state, "redis", None)
     try:
         results, result = await classifier.classify(
