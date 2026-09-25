@@ -59,6 +59,7 @@ jobs:
               tests/test_news_market.py
               tests/test_news_sentiment.py
               tests/test_provider_factory.py
+              tests/test_reads.py
               tests/test_refresh_endpoint.py
               tests/test_scanner_pipeline.py
           - service: risk-shield

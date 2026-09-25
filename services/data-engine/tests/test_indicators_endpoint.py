@@ -145,8 +145,8 @@ async def test_indicators_camelcase_keys(full_pool):
         "ema20", "ema50", "ema200", "atr14", "rvol", "rsi14",
         "macd", "macdSignal", "macdHist", "pos52w", "ext20", "ext50",
         "rsSpy5", "rsSpy20", "rsSector5", "rsSector20", "avgDollarVolume20",
-        "gapPct", "gaps20", "zones", "lastSwingLow", "sessionSoFar", "benchmarks", "computedAt",
-        "cached",
+        "gapPct", "gaps20", "zones", "lastSwingLow", "sessionSoFar", "volumeRead", "trendRead",
+        "momentumRead", "rangeRead", "benchmarks", "computedAt", "cached",
     }
     assert not any("_" in k for k in body)
 
@@ -175,7 +175,10 @@ async def test_cached_pre_part_body_still_validates(full_pool):
     redis = FakeRedis()
     main.app.state.redis = redis
     fresh = await main.get_indicators("AAPL")
-    old_body = fresh.model_dump(mode="json", by_alias=True, exclude={"cached", "last_swing_low"})
+    old_body = fresh.model_dump(mode="json", by_alias=True, exclude={
+        "cached", "last_swing_low", "session_so_far",
+        # 4.8b-de: a body cached before the four read blocks existed
+        "volume_read", "trend_read", "momentum_read", "range_read"})
     for side in ("support", "resistance"):
         for z in old_body["zones"][side]:
             for key in ("touches", "held", "broke", "lastTouch"):
@@ -187,6 +190,7 @@ async def test_cached_pre_part_body_still_validates(full_pool):
     assert served.cached is True and conn.fetch.await_count == reads
     assert served.last_swing_low is None
     assert served.zones.support[0].touches == 0 and served.zones.support[0].last_touch is None
+    assert served.volume_read is None and served.momentum_read is None and served.range_read is None
 
 
 def test_snapshot_from_bars_script():
@@ -462,6 +466,8 @@ AI_AGENT_INDICATOR_FIELDS = [
     "rsSector5", "rsSector20", "avgDollarVolume20", "gapPct", "gaps20", "zones", "lastSwingLow",
     # 4.8b-de: today so far (spec 4.8b decision 16); ai-agent projects it in 4.8b-ai.
     "sessionSoFar",
+    # 4.8b-de: the four read blocks (spec 4.8b decisions 2-4).
+    "volumeRead", "trendRead", "momentumRead", "rangeRead",
     "benchmarks", "computedAt", "cached",
 ]
 

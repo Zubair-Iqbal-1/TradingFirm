@@ -70,6 +70,63 @@ class SessionSoFarOut(BaseModel):
     model_config = {"populate_by_name": True}
 
 
+class BreakoutOut(BaseModel):
+    """The newest bar of the last 5 whose close cleared a zone that has held
+    from below at least as often as it broke: the zone's band (prices) and
+    the bar's RVOL."""
+    date: str
+    low: float
+    high: float
+    bar_rvol: Optional[float] = Field(None, alias="barRvol")
+
+    model_config = {"populate_by_name": True}
+
+
+class VolumeReadOut(BaseModel):
+    """Spec 4.8b decision 2. `Rvol` = a multiple of the 20-bar average
+    volume; `Days` = trading days."""
+    up_days5_rvol: Optional[float] = Field(None, alias="upDays5Rvol")
+    down_days5_rvol: Optional[float] = Field(None, alias="downDays5Rvol")
+    breakout: Optional[BreakoutOut] = None
+    pullback_days: int = Field(0, alias="pullbackDays")
+    pullback_rvol: Optional[float] = Field(None, alias="pullbackRvol")
+
+    model_config = {"populate_by_name": True}
+
+
+class TrendReadOut(BaseModel):
+    """Spec 4.8b decision 3: close > EMA20 > EMA50, EMA20 up over 10 bars
+    (and by how many ATRs), the last two fractal swing lows (prices)."""
+    stack_up: Optional[bool] = Field(None, alias="stackUp")
+    ema20_rising10: Optional[bool] = Field(None, alias="ema20Rising10")
+    ema20_slope10_atr: Optional[float] = Field(None, alias="ema20Slope10Atr")
+    swing_lows: list[float] = Field(default_factory=list, alias="swingLows")
+    higher_lows: bool = Field(False, alias="higherLows")
+
+    model_config = {"populate_by_name": True}
+
+
+class MomentumReadOut(BaseModel):
+    """Spec 4.8b decision 3 (the 09-24 rerun's four numbers)."""
+    move30_atr: Optional[float] = Field(None, alias="move30Atr")
+    range30_atr: Optional[float] = Field(None, alias="range30Atr")
+    closes_below_ema20: Optional[int] = Field(None, alias="closesBelowEma20")
+    lower_highs: bool = Field(False, alias="lowerHighs")
+
+    model_config = {"populate_by_name": True}
+
+
+class RangeReadOut(BaseModel):
+    """Spec 4.8b decision 4: the 60 bars before the last one."""
+    low: float
+    high: float
+    pos_frac: Optional[float] = Field(None, alias="posFrac")
+    ema20_crosses40: int = Field(0, alias="ema20Crosses40")
+    closed_outside: bool = Field(False, alias="closedOutside")
+
+    model_config = {"populate_by_name": True}
+
+
 class BenchmarkOut(BaseModel):
     """Which benchmark series was used and how many stored bars it had.
     `bars == 0` means the RS fields that need it are null."""
@@ -115,6 +172,12 @@ class IndicatorsResponse(BaseModel):
     # 4.8b-de: null outside market hours or when no download ran this
     # session; set on the way out like `cached`, never stored in a cache body.
     session_so_far: Optional[SessionSoFarOut] = Field(None, alias="sessionSoFar")
+    # 4.8b-de: the four read blocks (spec 4.8b decisions 2-4). Null in a
+    # body cached before the part, served until its TTL.
+    volume_read: Optional[VolumeReadOut] = Field(None, alias="volumeRead")
+    trend_read: Optional[TrendReadOut] = Field(None, alias="trendRead")
+    momentum_read: Optional[MomentumReadOut] = Field(None, alias="momentumRead")
+    range_read: Optional[RangeReadOut] = Field(None, alias="rangeRead")
 
     benchmarks: BenchmarksOut = BenchmarksOut()
     computed_at: datetime = Field(..., alias="computedAt")

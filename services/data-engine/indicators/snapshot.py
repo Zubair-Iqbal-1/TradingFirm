@@ -28,6 +28,10 @@ of the series the named function returns, over the full stored history:
                              side split (held_below … broke_above); ATR-width
                              merge and the windowed nearest-6 selection (2026-09-24)
     last_swing_low           last_swing_low(high, low): {price, date} or None
+    volume_read / trend_read / momentum_read / range_read
+                             indicators.reads (Part 4.8b-de, spec 4.8b decisions
+                             2-4): measurements only, no thresholds; the
+                             breakout reads the zones above
 
 Conventions:
   - Undefined is None (every NaN becomes None). No minimum bar count; a
@@ -47,6 +51,7 @@ import pandas as pd
 from indicators.levels import Zone, last_swing_low, support_resistance
 from indicators.momentum import check_52w_position, macd, relative_strength, rsi
 from indicators.moving_averages import ema
+from indicators.reads import momentum_read, range_read, trend_read, volume_read
 from indicators.volatility import calc_atr, extension, gap
 from indicators.volume import avg_dollar_volume, calc_rvol
 
@@ -108,6 +113,10 @@ def _empty_snapshot() -> dict:
         "gaps20": [],
         "zones": {"support": [], "resistance": []},
         "last_swing_low": None,
+        "volume_read": None,
+        "trend_read": None,
+        "momentum_read": None,
+        "range_read": None,
     }
 
 
@@ -187,4 +196,8 @@ def swing_snapshot(
             "resistance": [zone_to_dict(z) for z in zones["resistance"]],
         },
         "last_swing_low": swing_out,
+        "volume_read": volume_read(close, volume, zones["support"] + zones["resistance"], daily.index),
+        "trend_read": trend_read(high, low, close),
+        "momentum_read": momentum_read(high, low, close),
+        "range_read": range_read(high, low, close),
     }
