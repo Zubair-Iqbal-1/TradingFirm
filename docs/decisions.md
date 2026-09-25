@@ -1222,3 +1222,34 @@ On all four pre-expiry nights the 00:15 reading sat at ES −0.85…−0.95 / NQ
 **Why:** without it the block existed only when a refresh or scan had downloaded that session, so an in-session analysis almost never saw today.
 
 **Supersedes:** "only if a refresh or scan downloaded it" in the entry "The open session's bar is never stored" above.
+
+---
+
+## 2026-09-25 — 4.8b-ai: flags in ai-agent under `READS_VERSION`; `sessionSoFar` projected, bucketed in the fingerprint
+
+**Decision:** `reads.py` turns data-engine's four blocks into `uptrend` (four reasons; a null RS fails) and six flags at the parent spec's starting lines, all constants in one tuple under `READS_VERSION` 1 (in the fingerprint, stored as `prompt_inputs.readsVersion`; bump on any line or rule change). No flag is a rule: nothing rejects a plan, moves a level or removes `go`. The five 4.8b-de blocks are projected as-is with `Rvol` / `Days` / `Shares` suffixes (`PROJECTION_VERSION` 5, 62 → 100 paths). `sessionSoFar` enters the fingerprint as `price_bucket(sessionSoFar.last, entry, atr14)` beside the closed bar's bucket, null outside a session.
+
+**Why:** since 4.8b-de the closed bar cannot move the cache's price bucket, so an intraday move was invisible to it; the raw block would retire the cache on every 15-minute refetch. On the eleven with the strict breakout: 5 / 11 breakouts, `lowVolumeBreakout` AAL only, `dead` 4, `rangeBound` 4, `bleeding` 1, four rows with no flag.
+
+**Supersedes:** N/A.
+
+---
+
+## 2026-09-25 — One verdict schema; `waitFor` on any answer; four soft checks
+
+**Decision:** `analyze.llm_schema()` builds one schema for every call (`go` always in the enum, the plan fields present and nullable, `waitFor` text). What the decoder no longer forbids, `merge` rejects whole: `go` without a plan or on an extended plan, a plan field on a no-plan answer, a null plan field with a plan. `waitFor` (two sentences: the condition without a number, then a level printed in the plan or the zone list; cap 300) is accepted on any answer — stored in `plan_proposed.waitFor` with a plan, returned and logged without one. Four soft checks (an uncited raised flag, a number in `invalidation`, a blank `waitFor` on `wait` + plan, a `waitFor` level that matches no plan or zone level to the cent) become `contractWarnings`: logged, on the response, stored with the plan, never a rejection.
+
+**Why:** three schemas meant three cached prefixes per `prompt_sha` (2,585 / 2,481 / a third since 4.8a-de), each switch inside the TTL paying a write. The cost is one paid answer rejected when a model breaks a rule the prompt now states; the first paid calls show whether it does.
+
+**Supersedes:** 4.4's "the decoder drops `go`" (spec 4.4; 4.8a-de decision 6 for the extended plan).
+
+---
+
+## 2026-09-25 — Events carry an age; commentary and retellings are capped; 15 headlines reach the classifier
+
+**Decision:** `sources.source_type` (SeekingAlpha, ChartMill, or Zacks / Motley Fool text under `Yahoo`) is the one map; `events.group` gives every event `eventDate`, `ageDays`, `stale` (> 14 days), `rehash` (data-engine's `rehashOf`, or an event date > 14 days before `firstSeen`), `sourceType`; a stale or rehashed event is capped at `low`, an analyst piece without a new fact (`eventDate` on or after `firstSeen` − 3 days) at `medium`, and a capped event never holds the fingerprint. Nothing is dropped. `events.prefilter` cuts the dossier's headlines to 15 before the classifier (rehashes first, then questions and commentary, newest first; `dataQuality.newsPrefiltered` counts the rest, always present). The classifier answers `eventDate` (required, `YYYY-MM-DD` or null, never inferred; a pre-part cached label is served without the key and never re-classified), asks for a 120-character `oneLine`, and takes `LLM_CLASSIFIER_CACHE` (default off).
+
+**Why:** RIOT's top event of 2026-09-16 was a SeekingAlpha retelling labelled `high`; the classifier's output was ~67 % of its cost at 30 headlines and 200 characters. Measured after-figures come from the deploy's paid steps.
+
+**Supersedes:** N/A.
+
