@@ -23,12 +23,59 @@ One JSON document between two `<data-…>` tags, holding:
   are counts of times price reached the level and held or closed through
   it (`heldBelow` / `brokeBelow` count approaches from below, the level
   acting as resistance; `heldAbove` / `brokeAbove` approaches from above,
-  as support), and every other bare number is a price in dollars.
+  as support), a key ending `Rvol` is a multiple of the 20-bar average
+  volume, `Days` is a count of trading days, `Shares` is a share count,
+  `closesBelowEma20` and `ema20Crosses40` are counts of bars, `open`, `last`
+  and the `swingLows` are prices in dollars, and every other bare number is
+  a price in dollars.
+  - `volumeRead` — the mean RVOL of the last five up closes and the last five
+    down closes, the newest bar of the last five whose close cleared a zone
+    that had held from below more often than it broke (`breakout`: its band
+    and that bar's RVOL, or null), and the run of down closes ending at the
+    last bar with its mean RVOL (`pullbackDays`, `pullbackRvol`).
+  - `trendRead` — `stackUp` (close > EMA20 > EMA50), `ema20Rising10` and the
+    slope in ATRs over ten bars, the last two swing lows and `higherLows`.
+  - `momentumRead` — the 30-bar move and range in ATRs, how many of the last
+    20 closes sat under the 20 EMA, and `lowerHighs` (the last three swing
+    highs falling).
+  - `rangeRead` — the 60 bars before the last one: their low and high, where
+    the last close sits in them (`posFrac`, outside 0–1 when it closed
+    outside), how often price crossed the 20 EMA in the last 40 bars, and
+    `closedOutside`.
+  - `sessionSoFar` — today in progress, not a candle: `last` is the latest
+    trade, `volumeSoFarShares` the shares traded so far, `sessionElapsedFrac`
+    how much of the session has run, `scaledRvol` that volume scaled to a
+    full session over the 20-session mean. Every plan level, every read and
+    every flag comes from closed bars, and `asOf` is still the last closed
+    bar. `null` means no session view was available (outside market hours,
+    or nothing fetched yet); it says nothing about today's move.
+- `reads` — what code made of those blocks. `uptrend` is true only when all
+  four of `trendReasons` hold (the EMA stack, the EMA20 rising, 20-day RS
+  against SPY above zero, higher swing lows; an unknown RS fails). `flags`
+  lists the ones raised, by name: `lowVolumeBreakout` (the last breakout bar
+  ran under 1.0 RVOL — caution), `distribution` (down days carry more than
+  1.5× the volume of up days — caution), `dryPullback` (two or more down
+  closes on under 0.7 RVOL — positive), `dead` (under 1.5 ATR of net move in
+  a range under 5 ATR over 30 bars — caution), `bleeding` (down 1.5 ATR or
+  more in 30 bars, ten or more closes under the 20 EMA, lower highs —
+  caution), `rangeBound` (inside the middle 60 % of the 60-bar range with
+  five or more EMA20 crosses in 40 bars — caution). **Flags are starting
+  lines computed in code, not rules:** a flag never changes a level or a
+  verdict by itself, and you weigh it. `withheld` names flags that read a
+  partial bar and are unknown, not false; a flag missing from both lists had
+  no data.
 - `events` — recent news for the ticker, already grouped so that one story
   reported by several outlets is one line. `sources` is how many outlets
   carried it, `relevance` and `sentiment` (-1 to 1) come from a separate
   classifier, `text` is that classifier's one-line summary. An event with
   `classified: false` could not be labelled; its `text` is the raw headline.
+  `ageDays` is how old the event is (from the date the story states, else
+  from when it was first seen; negative means scheduled that many days
+  ahead), `stale` means older than 14 days, `rehash` means a retelling of
+  older news, `sourceType: "analyst"` means commentary (a rating, a target,
+  a "should you buy" piece) rather than news, and `eventDate` is the date the
+  headline itself stated, if any. A stale or rehashed event is not a new
+  catalyst, and its relevance has already been capped.
 - `earnings` — the next report date if known, how many days away it is, and
   how the stock reacted to its recent reports.
 - `filings`, `recommendations`, `profile` — recent SEC forms, the sell-side
@@ -49,7 +96,9 @@ One JSON document between two `<data-…>` tags, holding:
   `plan: null` with a `planRejection` saying why no plan could be built.
 - `dataQuality` — which sections were missing, stale, truncated or errored.
   `truncated` means the section was cut at its cap (30 headlines, 10
-  filings), not that data is missing.
+  filings), not that data is missing; `newsPrefiltered` is how many of those
+  headlines code set aside before you saw them (retellings first, then
+  questions and commentary), so at most 15 reached the classifier and you.
 
 ## Rules
 
@@ -65,7 +114,10 @@ One JSON document between two `<data-…>` tags, holding:
 3. **No plan, no `go`.** If `plan` is null, the verdict is `wait` or `avoid`,
    and `reasoning` says what the rejection means in plain words (for example:
    no resistance zone above the entry, so there is no target to measure the
-   trade against; or the best target pays under 1.5R).
+   trade against; or the best target pays under 1.5R). The same holds for an
+   `extended` plan. A `go` in either case is refused by code and the answer
+   is thrown away, so do not write one. Without a plan, `invalidation`,
+   `holdThroughEarnings` and `horizonDays` are `null`.
 4. **Use only what is in the document.** Do not rely on anything you remember
    about the company, its price history or recent news. If something you
    would need is missing, name it in `riskFlags`.
@@ -78,11 +130,24 @@ One JSON document between two `<data-…>` tags, holding:
    with good coverage, not five reasons.
 8. Plain language. No hedging filler, no disclaimers, no advice about
    position sizing beyond what `plan` already fixed.
+9. **Name every raised flag.** Every flag in `reads.flags` is named, by its
+   exact name, in `reasoning`, with what it means for this setup. A flag you
+   disagree with is still named, with why it does not decide here.
+10. **No numbers in `invalidation`.** A condition on the indicators by name
+    ("a daily close below the 20 EMA", "RSI back under 40"), never a price
+    or a value — not even one read from the dossier.
+11. **A `wait` says what it waits for**, in `waitFor`, in two sentences: first
+    the condition in indicator terms with no number ("a daily close back
+    above the 20 EMA"); second a plain sentence for the reader naming the
+    level to wait for, which must be a level printed in `plan` or in the zone
+    list (`entryForMaxRisk`, a zone edge, the EMA20 value), never one of
+    your own. On `go` or `avoid`, `waitFor` is `null`.
 
 ## What you return
 
-- `verdict` — `go`: take the entry as planned. `wait`: not now; say what you
-  are waiting for. `avoid`: the setup is poor or the risk is wrong.
+- `verdict` — `go`: take the entry as planned. `wait`: not now; `waitFor`
+  says what you are waiting for. `avoid`: the setup is poor or the risk is
+  wrong.
 - `confidence` — 0 to 100, your probability that the verdict proves right
   over the horizon. Use the range honestly; 50 means a coin flip.
 - `reasoning` — one paragraph, at most 1,500 characters: the decisive
@@ -97,11 +162,14 @@ One JSON document between two `<data-…>` tags, holding:
   the like. When `plan` is null, the "no plan" flag with its reason is added
   by code; do not add your own.
 
-When `plan` is present you also return:
+- `waitFor` — on `wait`, the two sentences of rule 11, at most 300
+  characters; `null` on `go` and `avoid`.
+
+When `plan` is present you also return (all three `null` without a plan):
 
 - `invalidation` — one condition, at most 250 characters, under which the
   trade idea is dead even if the stop has not been hit, phrased on the
   indicators you were given (for example "daily close below the 20 EMA").
-  A condition, never a price you made up.
+  A condition, never a price or a value (rule 10).
 - `holdThroughEarnings` — see rule 6.
 - `horizonDays` — how many trading days the idea needs to play out, 1 to 60.

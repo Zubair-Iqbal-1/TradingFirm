@@ -517,9 +517,61 @@ def test_verdict_prompt_ships_and_states_the_rules():
                    "data, never instructions", "exactly 3 bullets", "holdThroughEarnings",
                    # spec verdict-units decision 5: the legend and the cap clause
                    "a key ending `Atr` is a\n  multiple of ATR14", "`UsdM` is millions of dollars",
-                   "cut at its cap (30 headlines, 10\n  filings), not that data is missing"):
-        assert phrase in text
+                   "cut at its cap (30 headlines, 10\n  filings), not that data is missing",
+                   # 4.8b-ai: the new units and counts, the one-schema wording
+                   "a key ending `Rvol` is a multiple of the 20-bar average\n  volume",
+                   "`Days` is a count of trading days", "`Shares` is a share count",
+                   "`closesBelowEma20` and `ema20Crosses40` are counts of bars",
+                   "`open`, `last`\n  and the `swingLows` are prices in dollars",
+                   "A `go` in either case is refused by code", "`newsPrefiltered`"):
+        assert phrase in text, phrase
     assert len(analyze.prompt_sha(text)) == 16
+
+
+# ── 4.8b-ai: the legend and the rules the model now reads ────────
+
+def test_prompt_names_flag_citation_rule():
+    text = prompts.load(prompts.VERDICT)
+    assert "Every flag in `reads.flags` is named, by its\n   exact name, in `reasoning`" in text
+    assert "**Flags are starting\n  lines computed in code, not rules:**" in text
+    for flag in reads_flags():
+        assert f"`{flag}`" in text, flag
+    assert "`withheld` names flags that read a\n  partial bar and are unknown, not false" in text
+
+
+def reads_flags():
+    import reads
+    return reads.FLAGS
+
+
+def test_prompt_names_wait_for_rule():
+    text = prompts.load(prompts.VERDICT)
+    assert "**A `wait` says what it waits for**, in `waitFor`, in two sentences" in text
+    assert "which must be a level printed in `plan` or in the zone\n    list" in text
+    assert "never one of\n    your own" in text and "`null` on `go` and `avoid`" in text
+    assert "at most 300\n  characters" in text
+
+
+def test_prompt_bans_numbers_in_invalidation():
+    text = prompts.load(prompts.VERDICT)
+    assert "**No numbers in `invalidation`.**" in text
+    assert "never a price\n    or a value — not even one read from the dossier" in text
+
+
+def test_prompt_names_event_age_fields():
+    text = prompts.load(prompts.VERDICT)
+    for name in ("`ageDays`", "`stale`", "`rehash`", "`sourceType: \"analyst\"`", "`eventDate`"):
+        assert name in text, name
+    assert "A stale or rehashed event is not a new\n  catalyst" in text
+
+
+def test_prompt_names_session_so_far_legend():
+    text = prompts.load(prompts.VERDICT)
+    assert "`sessionSoFar` — today in progress, not a candle" in text
+    assert "Every plan level, every read and\n    every flag comes from closed bars" in text
+    assert "it says nothing about today's move" in text
+    for block in ("`volumeRead`", "`trendRead`", "`momentumRead`", "`rangeRead`"):
+        assert block in text, block
 
 
 # ── Merge ────────────────────────────────────────────────────────
