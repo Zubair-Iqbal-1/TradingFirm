@@ -1212,3 +1212,13 @@ On all four pre-expiry nights the 00:15 reading sat at ES −0.85…−0.95 / NQ
 **Why:** a 2 / 2 wall is not a ceiling. Under `≥` the ties (AAPL 2 / 2, CNK 2 / 2, OUST 4 / 4) left a breakout on 9 of 11.
 
 **Supersedes:** the `heldBelow ≥ brokeBelow` of the entry "4.8b splits into 4.8b-de and 4.8b-ai" above.
+
+---
+
+## 2026-09-25 — `sessionSoFar` is filled on read, one gated download per ticker per 15 minutes
+
+**Decision:** in market hours, a `/dossier` or `/indicators` read whose `sessionSoFar` stash is empty or more than 15 min old makes one light download of today's row (`download_daily([t], "2mo")`, no bar write, not the refresh and not its cooldown), stashes it and attaches it. A `SET NX EX 900` gate per ticker, taken before the call, bounds it to ≤ 4 downloads an hour per ticker (+1 per midday analyze at most); none outside market hours or without Redis.
+
+**Why:** without it the block existed only when a refresh or scan had downloaded that session, so an in-session analysis almost never saw today.
+
+**Supersedes:** "only if a refresh or scan downloaded it" in the entry "The open session's bar is never stored" above.

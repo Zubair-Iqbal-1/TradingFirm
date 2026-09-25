@@ -67,7 +67,13 @@ def _make_pool(bars: dict[tuple[str, str], list[dict]], stocks: dict[str, dict] 
 
 
 @pytest.fixture(autouse=True)
-def reset_app_state():
+def reset_app_state(monkeypatch):
+    # 4.8b-de: /indicators fills in sessionSoFar during market hours. Pin the
+    # clock to a Saturday so these tests never depend on when they run.
+    from datetime import datetime, timezone
+
+    import bar_session
+    monkeypatch.setattr(bar_session, "utc_now", lambda: datetime(2026, 9, 26, 15, 0, tzinfo=timezone.utc))
     main.app.state.provider = FixtureProvider()
     main.app.state.db_pool = None
     main.app.state.redis = None

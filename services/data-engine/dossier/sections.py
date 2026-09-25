@@ -26,7 +26,7 @@ class NoBarsStored(Exception):
     this into a 404; the dossier decides after trying a refresh."""
 
 
-async def indicators_body(pool, redis, ticker: str) -> IndicatorsResponse:
+async def indicators_body(pool, redis, ticker: str, provider=None) -> IndicatorsResponse:
     """
     The Part 1.7 snapshot for `ticker` from stored bars, Redis-cached for
     TTL_INDICATORS. `cached` is set on the way out, never stored.
@@ -34,7 +34,7 @@ async def indicators_body(pool, redis, ticker: str) -> IndicatorsResponse:
     Raises NoBarsStored when the ticker has no daily bars. Database errors
     propagate untouched (db.DB_ERRORS); the caller maps them to 503.
     """
-    from bar_session import read_session_so_far
+    from bar_session import session_so_far_on_read
     from cache import get_cached_indicators, set_cached_indicators
 
     if redis is not None:
@@ -47,7 +47,7 @@ async def indicators_body(pool, redis, ticker: str) -> IndicatorsResponse:
             try:
                 return IndicatorsResponse.model_validate({
                     **cached, "cached": True,
-                    "sessionSoFar": await read_session_so_far(redis, ticker),
+                    "sessionSoFar": await session_so_far_on_read(redis, provider, ticker),
                 })
             except Exception as e:
                 logger.warning(
@@ -114,7 +114,7 @@ async def indicators_body(pool, redis, ticker: str) -> IndicatorsResponse:
             logger.warning(f"Indicators cache write failed for {ticker}: {e}")
 
     # Part 4.8b-de: today so far is read at request time, never cached.
-    session = await read_session_so_far(redis, ticker)
+    session = await session_so_far_on_read(redis, provider, ticker)
     if session is not None:
         response.session_so_far = SessionSoFarOut.model_validate(session)
     return response

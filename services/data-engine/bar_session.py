@@ -226,21 +226,96 @@ async def stash_session_so_far(redis, ticker: str, dropped_daily: list[dict],
     ttl = max(int((session[2] - _aware(now)).total_seconds()), 1)
     try:
         from cache import set_session_so_far
-        await set_session_so_far(redis, ticker, block, ttl)
+        # `fetchedAt` (the download instant) rides in the stash only, for the
+        # read-side freshness rule; readers strip it (`_public`).
+        await set_session_so_far(redis, ticker, {**block, FETCHED_AT: _aware(now).isoformat()}, ttl)
     except Exception as e:
         logger.warning(f"sessionSoFar stash failed for {ticker}: {type(e).__name__}")
         return None
     return block
 
 
-async def read_session_so_far(redis, ticker: str, now: Optional[datetime] = None) -> Optional[dict]:
-    """The stashed block while a session is open, else None — so a body
-    cached before the close never carries it after. Fail-open."""
-    if redis is None or open_session(_aware(now or utc_now())) is None:
-        return None
+FETCHED_AT = "fetchedAt"
+
+
+def _public(stash: Optional[dict]) -> Optional[dict]:
+    return None if stash is None else {k: v for k, v in stash.items() if k != FETCHED_AT}
+
+
+async def _get_stash(redis, ticker: str) -> Optional[dict]:
     try:
         from cache import get_session_so_far
         return await get_session_so_far(redis, ticker)
     except Exception as e:
         logger.warning(f"sessionSoFar read failed for {ticker}: {type(e).__name__}")
         return None
+
+
+async def read_session_so_far(redis, ticker: str, now: Optional[datetime] = None) -> Optional[dict]:
+    """The stashed block while a session is open, else None — so a body
+    cached before the close never carries it after. No download: the
+    read-and-fill path is `session_so_far_on_read`. Fail-open."""
+    if redis is None or open_session(_aware(now or utc_now())) is None:
+        return None
+    return _public(await _get_stash(redis, ticker))
+
+
+# ── The read-side fill-in (Zubair's fix of 2026-09-25) ───────────
+#
+# Without it `sessionSoFar` exists only when a refresh or scan happened to
+# download this session. On a read in market hours with no stash, or one
+# fetched more than 15 minutes ago, one light download of today's row fills
+# it: `download_daily([t], "2mo")` (the 20 prior sessions the scaled RVOL
+# needs), no bar write, and NOT `refresh_ticker_bars` — the refresh's own
+# 15-minute reject (main.py, `refresh_cooldown_name`) is never consulted.
+# Budget: at most one download per ticker per 15 minutes, held by an atomic
+# SET NX EX 900 gate taken before the call (so ≤ 4 an hour per ticker, and
+# two concurrent reads download once); none outside market hours or without
+# Redis. A failed download is not retried until the gate expires.
+
+SESSION_FRESH_SECONDS = 900
+SESSION_FETCH_PERIOD = "2mo"
+SESSION_FETCH_TIMEOUT = 10.0
+
+
+async def session_so_far_on_read(redis, provider, ticker: str,
+                                 now: Optional[datetime] = None) -> Optional[dict]:
+    """sessionSoFar for a reader: the stash if fetched ≤ 15 min ago, else one
+    gated download of today's row, stashed and returned. None outside a
+    session, without Redis, when the gate is held, or when the download
+    fails or has no row for today. Never raises."""
+    import asyncio
+
+    now = _aware(now or utc_now())
+    if redis is None or open_session(now) is None:
+        return None
+    stash = await _get_stash(redis, ticker)
+    if stash is not None:
+        try:
+            age = (now - datetime.fromisoformat(stash[FETCHED_AT])).total_seconds()
+        except (KeyError, TypeError, ValueError):
+            age = None
+        if age is not None and 0 <= age <= SESSION_FRESH_SECONDS:
+            return _public(stash)
+    if provider is None:
+        return None
+    try:
+        from cache import session_fetch_key
+        if not await redis.set(session_fetch_key(ticker), now.isoformat(),
+                               ex=SESSION_FRESH_SECONDS, nx=True):
+            return None                     # a download ran < 15 min ago
+    except Exception as e:
+        logger.warning(f"sessionSoFar gate failed for {ticker}: {type(e).__name__}")
+        return None
+    try:
+        from db import bar_records_from_df
+        logger.info(f"sessionSoFar fill-in: 1 daily download for {ticker} ({SESSION_FETCH_PERIOD})")
+        bulk = await asyncio.wait_for(
+            provider.download_daily([ticker], period=SESSION_FETCH_PERIOD), SESSION_FETCH_TIMEOUT)
+        records = bar_records_from_df(provider.extract_ticker_df(bulk, ticker))
+        del bulk
+    except Exception as e:
+        logger.warning(f"sessionSoFar fill-in download failed for {ticker}: {type(e).__name__}")
+        return None
+    kept, dropped = drop_open_session_bars(records, INTERVAL_DAILY, now)
+    return await stash_session_so_far(redis, ticker, dropped, kept, now)

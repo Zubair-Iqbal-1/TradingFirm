@@ -682,7 +682,8 @@ async def get_indicators(ticker: str):
     from dossier.sections import NoBarsStored, indicators_body
 
     try:
-        return await indicators_body(app.state.db_pool, app.state.redis, ticker)
+        return await indicators_body(app.state.db_pool, app.state.redis, ticker,
+                                     provider=app.state.provider)
     except NoBarsStored:
         raise HTTPException(status_code=404, detail=f"No stored '1d' bars for '{ticker}'.")
     except Exception as e:
@@ -784,11 +785,14 @@ async def get_dossier(ticker: str, horizon: str = Query(HORIZON_SWING)):
         f"calls={budget.upstream_calls} bySource={budget.by_source} "
         f"elapsed={budget.elapsed_ms}ms"
     )
-    from bar_session import read_session_so_far
+    # Today so far, read (and filled in with one gated download when the
+    # stash is empty or > 15 min old) on every request, cached or not.
+    from bar_session import session_so_far_on_read
     indicators = body.get("sections", {}).get("indicators")
     if isinstance(indicators, dict):
+        session = await session_so_far_on_read(app.state.redis, app.state.provider, ticker)
         body = {**body, "sections": {**body["sections"], "indicators": {
-            **indicators, "sessionSoFar": await read_session_so_far(app.state.redis, ticker)}}}
+            **indicators, "sessionSoFar": session}}}
     return DossierResponse.model_validate({
         **body,
         "cached": from_cache,

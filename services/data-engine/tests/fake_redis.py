@@ -19,10 +19,17 @@ class FakeRedis:
         if command in self.fail_on:
             raise ConnectionError(f"fake redis: {command} unavailable")
 
-    async def set(self, key, value, ex=None):
+    async def set(self, key, value, ex=None, nx=False):
+        """`nx=True`: only when the key is absent (or expired); True if set,
+        None if not — redis-py's answers."""
         self._check("set")
+        if nx:
+            entry = self._store.get(key)
+            if entry is not None and (entry[1] is None or _time.time() <= entry[1]):
+                return None
         expires_at = _time.time() + ex if ex else None
         self._store[key] = (value, expires_at)
+        return True
 
     async def get(self, key):
         self._check("get")

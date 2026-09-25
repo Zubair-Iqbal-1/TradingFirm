@@ -265,6 +265,12 @@ def session_key(ticker: str) -> str:
     return f"{CACHE_SESSION_PREFIX}{ticker}"
 
 
+def session_fetch_key(ticker: str) -> str:
+    """The read-side fill-in's gate: held for 15 min after each download
+    attempt (bar_session.session_so_far_on_read)."""
+    return f"{CACHE_SESSION_PREFIX}fetch:{ticker}"
+
+
 async def set_session_so_far(r: aioredis.Redis, ticker: str, block: dict, ttl: int) -> None:
     await r.set(session_key(ticker), json.dumps(block), ex=ttl)
 

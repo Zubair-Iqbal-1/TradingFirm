@@ -834,6 +834,10 @@ def app_state(monkeypatch):
     # real session: after 2026-09-10 the refresh path runs and its upstream
     # calls land in the budget. Test-only: the code under test is unchanged.
     monkeypatch.setattr(DossierContext, "now_utc", lambda self: NOW)
+    # 4.8b-de: the endpoint fills in sessionSoFar during market hours; NOW
+    # (22:00Z) is after the close, so no test here depends on the wall clock.
+    import bar_session
+    monkeypatch.setattr(bar_session, "utc_now", lambda: NOW)
 
     pool = FakePool(bars={(TICKER, "1d"): _bars(60, TODAY)})
     redis = FakeRedis()
@@ -1180,8 +1184,10 @@ def test_dossier_session_so_far_attached_at_read_time(_no_network, app_state, mo
     block = {"open": 10.0, "high": 11.0, "low": 9.5, "last": 10.5, "volumeSoFar": 1000,
              "sessionElapsedFrac": 0.5, "changeVsPriorClosePct": 1.0, "rvolScaled": 1.1,
              "inProgress": True}
-    asyncio.run(set_session_so_far(redis, TICKER, block, 3600))
     in_session = datetime(2026, 9, 9, 16, 0, tzinfo=timezone.utc)    # 12:00 ET, a Wednesday
+    # A fresh stash (fetched 5 min ago), so the read serves it without a download.
+    asyncio.run(set_session_so_far(redis, TICKER, {
+        **block, "fetchedAt": (in_session - timedelta(minutes=5)).isoformat()}, 3600))
     monkeypatch.setattr(bar_session, "utc_now", lambda: in_session)
 
     first = _get().json()

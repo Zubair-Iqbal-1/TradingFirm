@@ -269,7 +269,9 @@ FastAPI app. Key pieces:
   path drops today's daily row before the close and every unfinished
   hourly row. A dropped daily row is kept as `sessionSoFar` in Redis
   (`tf:cache:session:{ticker}`, TTL to the close) and served while the
-  session trades, only if a refresh or scan downloaded it.
+  session trades; a read finding it empty or > 15 min old makes one light
+  download of today's row (gated: ≤ 4 an hour per ticker, none outside
+  market hours).
 - **`GET /dossier/{ticker}?horizon=swing`** — one document per ticker
   (`dossier/`): the indicator snapshot and zones, Finnhub news, events,
   recommendations and profile, EDGAR filings, and Part 2.3's earnings

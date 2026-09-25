@@ -10,7 +10,7 @@ Dates used: 2026-09-24 (Thu, a full session, close 16:00 ET = 20:00 UTC),
 
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -186,3 +186,121 @@ async def test_session_so_far_absent_without_stash():
     broken = FakeRedis(fail_on={"set", "get"})
     assert await stash_session_so_far(broken, "AAPL", [TODAY_ROW], _prior(), utc(2026, 9, 24, 17, 0)) is None
     assert await read_session_so_far(broken, "AAPL", utc(2026, 9, 24, 17, 0)) is None
+
+
+# ── The read-side fill-in (Zubair's fix of 2026-09-25) ───────────
+
+from bar_session import session_so_far_on_read  # noqa: E402
+
+
+class CountingProvider:
+    """download_daily returns 25 prior sessions of volume 1,000,000 at close
+    100, then today's partial row; counts the calls and the periods asked."""
+
+    def __init__(self, today_close=102.0, fail=False):
+        self.calls, self.periods, self.today_close, self.fail = 0, [], today_close, fail
+
+    async def download_daily(self, tickers, period="1y"):
+        import pandas as pd
+        self.calls += 1
+        self.periods.append(period)
+        if self.fail:
+            raise RuntimeError("provider down")
+        days = list(pd.bdate_range(end="2026-09-23", periods=25)) + [pd.Timestamp("2026-09-24")]
+        rows = [{"Open": 100.0, "High": 100.0, "Low": 100.0, "Close": 100.0, "Volume": 1_000_000}] * 25
+        rows = rows + [{"Open": 101.0, "High": 103.0, "Low": 99.5, "Close": self.today_close,
+                        "Volume": 600_000}]
+        return {tickers[0]: pd.DataFrame(rows, index=pd.DatetimeIndex(days))}
+
+    def extract_ticker_df(self, bulk, ticker):
+        return bulk.get(ticker)
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    """One frozen clock for the code and for FakeRedis's TTLs."""
+    import tests.fake_redis as fake
+
+    state = {"now": utc(2026, 9, 24, 16, 45)}
+
+    class _T:
+        @staticmethod
+        def time():
+            return state["now"].timestamp()
+
+    monkeypatch.setattr(fake, "_time", _T)
+    monkeypatch.setattr(bar_session, "utc_now", lambda: state["now"])
+    return state
+
+
+@pytest.mark.asyncio
+async def test_session_so_far_fetched_on_read_when_empty(clock):
+    """No stash, 12:45 ET: one 2-month daily download, the block computed
+    from it (+2 %, half a session, scaled RVOL 1.2), stashed and returned."""
+    redis, provider = FakeRedis(), CountingProvider()
+    block = await session_so_far_on_read(redis, provider, "AAPL")
+    assert provider.calls == 1 and provider.periods == ["2mo"]
+    assert block["last"] == 102.0 and block["changeVsPriorClosePct"] == pytest.approx(2.0)
+    assert block["rvolScaled"] == pytest.approx(1.2) and "fetchedAt" not in block
+    assert await read_session_so_far(redis, "AAPL") == block
+
+
+@pytest.mark.asyncio
+async def test_session_so_far_reused_within_15_min(clock):
+    redis, provider = FakeRedis(), CountingProvider()
+    first = await session_so_far_on_read(redis, provider, "AAPL")
+    clock["now"] = utc(2026, 9, 24, 17, 0)                       # +15 min: still fresh
+    assert await session_so_far_on_read(redis, provider, "AAPL") == first
+    assert provider.calls == 1
+    # A stash written by a refresh counts the same way.
+    other = FakeRedis()
+    await stash_session_so_far(other, "MSFT", [TODAY_ROW], _prior(), utc(2026, 9, 24, 16, 50))
+    assert (await session_so_far_on_read(other, provider, "MSFT"))["last"] == 102.0
+    assert provider.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_session_so_far_refetched_after_15_min(clock):
+    """At +16 min the stash is stale: a second download, which overwrites it.
+    A failed download is not retried until its 15-min gate expires."""
+    redis, provider = FakeRedis(), CountingProvider()
+    await session_so_far_on_read(redis, provider, "AAPL")
+    clock["now"] = utc(2026, 9, 24, 17, 1)
+    provider.today_close = 104.0
+    block = await session_so_far_on_read(redis, provider, "AAPL")
+    assert provider.calls == 2 and block["last"] == 104.0
+    assert (await read_session_so_far(redis, "AAPL"))["last"] == 104.0
+
+    broken = CountingProvider(fail=True)
+    fresh = FakeRedis()
+    assert await session_so_far_on_read(fresh, broken, "IAG") is None
+    clock["now"] = utc(2026, 9, 24, 17, 10)
+    assert await session_so_far_on_read(fresh, broken, "IAG") is None
+    assert broken.calls == 1, "the gate holds 15 min after a failed attempt"
+    clock["now"] = utc(2026, 9, 24, 17, 17)
+    await session_so_far_on_read(fresh, broken, "IAG")
+    assert broken.calls == 2
+    # Over one market hour the gate allows at most 4 downloads per ticker.
+    hour, busy = FakeRedis(), CountingProvider(fail=True)
+    for minute in range(60):
+        clock["now"] = utc(2026, 9, 24, 17, 0) + timedelta(minutes=minute)
+        await session_so_far_on_read(hour, busy, "RIOT")
+    assert busy.calls == 4
+
+
+@pytest.mark.asyncio
+async def test_session_so_far_no_fetch_outside_hours(clock):
+    provider = CountingProvider()
+    for when in (utc(2026, 9, 24, 12, 0),       # 08:00 ET, pre-market
+                 utc(2026, 9, 24, 20, 0),       # the close
+                 utc(2026, 9, 26, 15, 0),       # Saturday
+                 utc(2026, 11, 26, 16, 0)):     # Thanksgiving
+        clock["now"] = when
+        assert await session_so_far_on_read(FakeRedis(), provider, "AAPL") is None
+    clock["now"] = utc(2026, 9, 24, 16, 45)
+    assert await session_so_far_on_read(None, provider, "AAPL") is None, "no Redis, no gate, no call"
+    assert provider.calls == 0
+    # A download with no row for today (just after the open) stashes nothing.
+    stale = CountingProvider()
+    clock["now"] = utc(2026, 9, 25, 13, 35)
+    assert await session_so_far_on_read(FakeRedis(), stale, "AAPL") is None and stale.calls == 1
