@@ -204,10 +204,10 @@ def session_so_far(
         "high": float(open_bar["high"]),
         "low": float(open_bar["low"]),
         "last": last,
-        "volumeSoFar": int(volume),
+        "volumeSoFarShares": int(volume),
         "sessionElapsedFrac": elapsed,
         "changeVsPriorClosePct": change,
-        "rvolScaled": rvol,
+        "scaledRvol": rvol,
         "inProgress": True,
     }
 

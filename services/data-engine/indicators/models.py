@@ -54,17 +54,17 @@ class SessionSoFarOut(BaseModel):
     """Today so far, while the session trades (Part 4.8b-de, spec 4.8b
     decision 16): not a candle. From the download that dropped the open
     session's row; attached at read time, never cached. Prices in dollars,
-    `volumeSoFar` in shares, `sessionElapsedFrac` 0-1 of the session's real
-    length, `changeVsPriorClosePct` percent, `rvolScaled` a ratio like `rvol`
+    `volumeSoFarShares` in shares, `sessionElapsedFrac` 0-1 of the session's real
+    length, `changeVsPriorClosePct` percent, `scaledRvol` a ratio like `rvol`
     (volume so far scaled to a full session over the 20-session mean)."""
     open: float
     high: float
     low: float
     last: float
-    volume_so_far: int = Field(..., alias="volumeSoFar")
+    volume_so_far_shares: int = Field(..., alias="volumeSoFarShares")
     session_elapsed_frac: Optional[float] = Field(None, alias="sessionElapsedFrac")
     change_vs_prior_close_pct: Optional[float] = Field(None, alias="changeVsPriorClosePct")
-    rvol_scaled: Optional[float] = Field(None, alias="rvolScaled")
+    scaled_rvol: Optional[float] = Field(None, alias="scaledRvol")
     in_progress: bool = Field(True, alias="inProgress")
 
     model_config = {"populate_by_name": True}

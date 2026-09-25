@@ -487,6 +487,12 @@ def test_indicator_fields_pinned_for_ai_agent():
 
     aliases = [f.alias or name for name, f in IndicatorsResponse.model_fields.items()]
     assert aliases == AI_AGENT_INDICATOR_FIELDS
+    # 4.8b-de: sessionSoFar's own keys, each with its unit (Zubair's rename of
+    # 2026-09-25: volumeSoFarShares, scaledRvol). ai-agent projects them in 4.8b-ai.
+    from indicators.models import SessionSoFarOut
+    inner = [f.alias or name for name, f in SessionSoFarOut.model_fields.items()]
+    assert inner == ["open", "high", "low", "last", "volumeSoFarShares", "sessionElapsedFrac",
+                     "changeVsPriorClosePct", "scaledRvol", "inProgress"]
 
     # profile.marketCap: ai-agent projects it as `marketCapUsdM`, millions of
     # USD, which is only true while it comes from Finnhub profile2 unchanged.

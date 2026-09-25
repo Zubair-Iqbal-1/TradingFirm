@@ -1181,8 +1181,8 @@ def test_dossier_session_so_far_attached_at_read_time(_no_network, app_state, mo
 
     _mount_all(_no_network)
     _pool, redis = app_state
-    block = {"open": 10.0, "high": 11.0, "low": 9.5, "last": 10.5, "volumeSoFar": 1000,
-             "sessionElapsedFrac": 0.5, "changeVsPriorClosePct": 1.0, "rvolScaled": 1.1,
+    block = {"open": 10.0, "high": 11.0, "low": 9.5, "last": 10.5, "volumeSoFarShares": 1000,
+             "sessionElapsedFrac": 0.5, "changeVsPriorClosePct": 1.0, "scaledRvol": 1.1,
              "inProgress": True}
     in_session = datetime(2026, 9, 9, 16, 0, tzinfo=timezone.utc)    # 12:00 ET, a Wednesday
     # A fresh stash (fetched 5 min ago), so the read serves it without a download.
