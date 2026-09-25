@@ -59,6 +59,8 @@ TTL_DOSSIER_MARKET = 900          # 15 min while the market is open
 TTL_DOSSIER_CLOSED = 3600         # 60 min outside market hours
 TTL_DOSSIER_ERROR = 120           # a document with a failed section: 2 min
 CACHE_DOSSIER_PREFIX = "tf:cache:dossier:"
+# Part 4.8b-de: the open session so far, per ticker, TTL to the close.
+CACHE_SESSION_PREFIX = "tf:cache:session:"
 
 
 # ── Connection ───────────────────────────────────────────────────
@@ -254,6 +256,30 @@ async def delete_cached_indicators(r: aioredis.Redis, ticker: str) -> int:
     """Drop the cached snapshot (after a refresh wrote new bars). Returns
     the number of keys removed (0 or 1)."""
     return int(await r.delete(indicators_key(ticker)))
+
+
+# ── The open session so far (Part 4.8b-de) ───────────────────────
+
+def session_key(ticker: str) -> str:
+    """Cache key for one ticker's sessionSoFar block (normalized ticker)."""
+    return f"{CACHE_SESSION_PREFIX}{ticker}"
+
+
+async def set_session_so_far(r: aioredis.Redis, ticker: str, block: dict, ttl: int) -> None:
+    await r.set(session_key(ticker), json.dumps(block), ex=ttl)
+
+
+async def get_session_so_far(r: aioredis.Redis, ticker: str) -> Optional[dict]:
+    """The stashed block, or None on a miss or a body that is not an object."""
+    data = await r.get(session_key(ticker))
+    if data is None:
+        return None
+    try:
+        body = json.loads(data)
+    except (TypeError, ValueError):
+        logger.warning(f"sessionSoFar cache for {ticker} is not valid JSON, ignoring")
+        return None
+    return body if isinstance(body, dict) else None
 
 
 # ── Dossier documents (Part 2.4) ─────────────────────────────────

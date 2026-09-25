@@ -50,6 +50,26 @@ class SwingLowOut(BaseModel):
     date: str
 
 
+class SessionSoFarOut(BaseModel):
+    """Today so far, while the session trades (Part 4.8b-de, spec 4.8b
+    decision 16): not a candle. From the download that dropped the open
+    session's row; attached at read time, never cached. Prices in dollars,
+    `volumeSoFar` in shares, `sessionElapsedFrac` 0-1 of the session's real
+    length, `changeVsPriorClosePct` percent, `rvolScaled` a ratio like `rvol`
+    (volume so far scaled to a full session over the 20-session mean)."""
+    open: float
+    high: float
+    low: float
+    last: float
+    volume_so_far: int = Field(..., alias="volumeSoFar")
+    session_elapsed_frac: Optional[float] = Field(None, alias="sessionElapsedFrac")
+    change_vs_prior_close_pct: Optional[float] = Field(None, alias="changeVsPriorClosePct")
+    rvol_scaled: Optional[float] = Field(None, alias="rvolScaled")
+    in_progress: bool = Field(True, alias="inProgress")
+
+    model_config = {"populate_by_name": True}
+
+
 class BenchmarkOut(BaseModel):
     """Which benchmark series was used and how many stored bars it had.
     `bars == 0` means the RS fields that need it are null."""
@@ -92,6 +112,9 @@ class IndicatorsResponse(BaseModel):
     # ai-agent projects this key as-is (spec 4.8a-de decision 3); both
     # indicator pin tests list it. None with fewer than 5 bars or no pivot.
     last_swing_low: Optional[SwingLowOut] = Field(None, alias="lastSwingLow")
+    # 4.8b-de: null outside market hours or when no download ran this
+    # session; set on the way out like `cached`, never stored in a cache body.
+    session_so_far: Optional[SessionSoFarOut] = Field(None, alias="sessionSoFar")
 
     benchmarks: BenchmarksOut = BenchmarksOut()
     computed_at: datetime = Field(..., alias="computedAt")

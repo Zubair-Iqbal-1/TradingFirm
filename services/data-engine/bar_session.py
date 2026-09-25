@@ -166,3 +166,81 @@ def drop_open_session_bars(
             f"newest {dropped[-1]['ts'].isoformat()}"
         )
     return kept, dropped
+
+
+# ── sessionSoFar (spec 4.8b decision 16) ─────────────────────────
+#
+# The open session's row, dropped above, is still worth reading as what it
+# is: today so far, not a candle. The write path that dropped it computes
+# this block from the same download and keeps it in Redis until the close;
+# readers attach it at read time, never from a cached body.
+
+RVOL_LOOKBACK = 20
+RVOL_MIN_ELAPSED_SECONDS = 300      # no scaled RVOL in the first 5 minutes
+
+
+def session_so_far(
+    open_bar: dict, prior_daily: list[dict], now: datetime,
+    session_open: datetime, session_close: datetime,
+) -> dict:
+    """The block for the open session's row `open_bar`, as of `now` (the
+    download instant). `prior_daily` are the stored-shape daily rows before
+    it, oldest first. Keys carry their units: prices, shares, a 0–1
+    fraction of the session, a percent, a ratio like `rvol`."""
+    now = _aware(now)
+    length = (session_close - session_open).total_seconds()
+    elapsed_s = min(max((now - session_open).total_seconds(), 0.0), length)
+    elapsed = elapsed_s / length if length > 0 else None
+    prior_close = float(prior_daily[-1]["close"]) if prior_daily else None
+    last = float(open_bar["close"])
+    change = ((last - prior_close) / prior_close * 100) if prior_close else None
+    window = [float(r["volume"]) for r in prior_daily[-RVOL_LOOKBACK:]]
+    avg = sum(window) / len(window) if len(window) == RVOL_LOOKBACK else None
+    volume = float(open_bar["volume"])
+    rvol = (volume / elapsed / avg
+            if avg and elapsed and elapsed_s >= RVOL_MIN_ELAPSED_SECONDS else None)
+    return {
+        "open": float(open_bar["open"]),
+        "high": float(open_bar["high"]),
+        "low": float(open_bar["low"]),
+        "last": last,
+        "volumeSoFar": int(volume),
+        "sessionElapsedFrac": elapsed,
+        "changeVsPriorClosePct": change,
+        "rvolScaled": rvol,
+        "inProgress": True,
+    }
+
+
+async def stash_session_so_far(redis, ticker: str, dropped_daily: list[dict],
+                               prior_daily: list[dict], now: datetime) -> Optional[dict]:
+    """Compute and keep the block for the dropped open-session row, TTL to
+    the close. Only while the session trades (a pre-market row has no
+    session yet). Fail-open: a Redis failure is logged, never raised."""
+    if not dropped_daily or redis is None:
+        return None
+    session = open_session(now)
+    if session is None or _row_date(dropped_daily[-1]["ts"]) != session[0]:
+        return None
+    block = session_so_far(dropped_daily[-1], prior_daily, now, session[1], session[2])
+    ttl = max(int((session[2] - _aware(now)).total_seconds()), 1)
+    try:
+        from cache import set_session_so_far
+        await set_session_so_far(redis, ticker, block, ttl)
+    except Exception as e:
+        logger.warning(f"sessionSoFar stash failed for {ticker}: {type(e).__name__}")
+        return None
+    return block
+
+
+async def read_session_so_far(redis, ticker: str, now: Optional[datetime] = None) -> Optional[dict]:
+    """The stashed block while a session is open, else None — so a body
+    cached before the close never carries it after. Fail-open."""
+    if redis is None or open_session(_aware(now or utc_now())) is None:
+        return None
+    try:
+        from cache import get_session_so_far
+        return await get_session_so_far(redis, ticker)
+    except Exception as e:
+        logger.warning(f"sessionSoFar read failed for {ticker}: {type(e).__name__}")
+        return None

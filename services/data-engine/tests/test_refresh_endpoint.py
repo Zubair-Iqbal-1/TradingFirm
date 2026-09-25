@@ -195,3 +195,47 @@ async def test_refresh_drops_open_session_bar(monkeypatch):
     assert result["hourlyBars"] == len(hourly_df) - hourly_open
     daily_rows = conn.executemany.await_args_list[0].args[1]
     assert all(row[2].date() != last_day for row in daily_rows)
+
+
+@pytest.mark.asyncio
+async def test_session_so_far_not_in_cached_body(monkeypatch):
+    """Refreshed in session: the dropped row becomes sessionSoFar (TTL to the
+    close); /indicators serves it on the way out while the cached body keeps
+    it null, and a read after the close is null (spec 4.8b decision 16)."""
+    import json
+    from datetime import timedelta
+
+    import bar_session
+    from cache import indicators_key, session_key
+
+    pool, conn = _make_pool()
+    main.app.state.db_pool = pool
+    redis = FakeRedis()
+    main.app.state.redis = redis
+    provider = FixtureProvider()
+    daily_df = provider.extract_ticker_df(await provider.download_daily(["AAPL"]), "AAPL")
+    opens, closes = bar_session.session_times(daily_df.index[-1].date())
+    now = opens + timedelta(minutes=90)
+    monkeypatch.setattr(bar_session, "utc_now", lambda: now)
+
+    await main.refresh_stock("AAPL")
+    stash = json.loads(await redis.get(session_key("AAPL")))
+    last = daily_df.iloc[-1]
+    assert stash["last"] == pytest.approx(float(last["Close"])) and stash["inProgress"] is True
+    assert stash["sessionElapsedFrac"] == pytest.approx(90 / ((closes - opens).total_seconds() / 60))
+    assert 0 < await redis.ttl(session_key("AAPL")) <= (closes - now).total_seconds()
+
+    # The stored daily rows are what /indicators reads: feed them back.
+    daily_rows = conn.executemany.await_args_list[0].args[1]
+    rows = [{"ts": r[2], "open": r[3], "high": r[4], "low": r[5], "close": r[6], "volume": r[7]}
+            for r in daily_rows]
+    conn.fetch = AsyncMock(side_effect=lambda q, *a: rows if a[:2] == ("AAPL", "1d") else [])
+    conn.fetchrow = AsyncMock(return_value=None)
+    served = await main.get_indicators("AAPL")
+    assert served.session_so_far is not None and served.session_so_far.last == stash["last"]
+    assert "sessionSoFar" not in json.loads(await redis.get(indicators_key("AAPL")))
+    hit = await main.get_indicators("AAPL")
+    assert hit.cached is True and hit.session_so_far is not None
+
+    monkeypatch.setattr(bar_session, "utc_now", lambda: closes)
+    assert (await main.get_indicators("AAPL")).session_so_far is None

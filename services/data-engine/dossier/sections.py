@@ -16,6 +16,7 @@ import logging
 from datetime import datetime, timezone
 
 from indicators import IndicatorsResponse, sector_etf, swing_snapshot
+from indicators.models import SessionSoFarOut
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,7 @@ async def indicators_body(pool, redis, ticker: str) -> IndicatorsResponse:
     Raises NoBarsStored when the ticker has no daily bars. Database errors
     propagate untouched (db.DB_ERRORS); the caller maps them to 503.
     """
+    from bar_session import read_session_so_far
     from cache import get_cached_indicators, set_cached_indicators
 
     if redis is not None:
@@ -43,7 +45,10 @@ async def indicators_body(pool, redis, ticker: str) -> IndicatorsResponse:
             cached = None
         if cached is not None:
             try:
-                return IndicatorsResponse.model_validate({**cached, "cached": True})
+                return IndicatorsResponse.model_validate({
+                    **cached, "cached": True,
+                    "sessionSoFar": await read_session_so_far(redis, ticker),
+                })
             except Exception as e:
                 logger.warning(
                     f"Indicators cache for {ticker} does not match the schema, recomputing: {e}"
@@ -102,9 +107,14 @@ async def indicators_body(pool, redis, ticker: str) -> IndicatorsResponse:
     # not the data, and is set on the way out (True on a hit, False here).
     if redis is not None:
         try:
-            body = response.model_dump(mode="json", by_alias=True, exclude={"cached"})
+            body = response.model_dump(mode="json", by_alias=True,
+                                       exclude={"cached", "session_so_far"})
             await set_cached_indicators(redis, ticker, body)
         except Exception as e:
             logger.warning(f"Indicators cache write failed for {ticker}: {e}")
 
+    # Part 4.8b-de: today so far is read at request time, never cached.
+    session = await read_session_so_far(redis, ticker)
+    if session is not None:
+        response.session_so_far = SessionSoFarOut.model_validate(session)
     return response

@@ -145,7 +145,8 @@ async def test_indicators_camelcase_keys(full_pool):
         "ema20", "ema50", "ema200", "atr14", "rvol", "rsi14",
         "macd", "macdSignal", "macdHist", "pos52w", "ext20", "ext50",
         "rsSpy5", "rsSpy20", "rsSector5", "rsSector20", "avgDollarVolume20",
-        "gapPct", "gaps20", "zones", "lastSwingLow", "benchmarks", "computedAt", "cached",
+        "gapPct", "gaps20", "zones", "lastSwingLow", "sessionSoFar", "benchmarks", "computedAt",
+        "cached",
     }
     assert not any("_" in k for k in body)
 
@@ -459,6 +460,8 @@ AI_AGENT_INDICATOR_FIELDS = [
     "ticker", "asOf", "bars", "close", "sector", "ema20", "ema50", "ema200", "atr14", "rvol",
     "rsi14", "macd", "macdSignal", "macdHist", "pos52w", "ext20", "ext50", "rsSpy5", "rsSpy20",
     "rsSector5", "rsSector20", "avgDollarVolume20", "gapPct", "gaps20", "zones", "lastSwingLow",
+    # 4.8b-de: today so far (spec 4.8b decision 16); ai-agent projects it in 4.8b-ai.
+    "sessionSoFar",
     "benchmarks", "computedAt", "cached",
 ]
 

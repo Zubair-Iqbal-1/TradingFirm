@@ -65,9 +65,12 @@ class MarketScanner:
      10. Float 20M–1B (enrichment gate)
     """
 
-    def __init__(self, provider: DataProvider, db_pool=None):
+    def __init__(self, provider: DataProvider, db_pool=None, redis=None):
         self.provider = provider
         self.db_pool = db_pool
+        # Part 4.8b-de: where a winner's open-session row is kept as
+        # sessionSoFar (bar_session.stash_session_so_far). None = not kept.
+        self.redis = redis
 
     async def run_scan(
         self,
@@ -322,7 +325,7 @@ class MarketScanner:
         if self.db_pool is None or not winners:
             return
 
-        from bar_session import drop_open_session_bars, utc_now
+        from bar_session import drop_open_session_bars, stash_session_so_far, utc_now
         from db import bar_records_from_df, upsert_bars
 
         # Part 4.8b-de: ranking above used today's partial bar in memory; the
@@ -338,6 +341,8 @@ class MarketScanner:
                 try:
                     kept, _open = drop_open_session_bars(bar_records_from_df(frame), interval, now)
                     await upsert_bars(self.db_pool, ticker, interval, kept)
+                    if interval == "1d":
+                        await stash_session_so_far(self.redis, ticker, _open, kept, now)
                 except Exception as e:
                     logger.warning(f"Bar persist failed for {ticker} ({interval}): {e}")
 

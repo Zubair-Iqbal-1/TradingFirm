@@ -133,7 +133,7 @@ async def lifespan(app: FastAPI):
         f"EDGAR configured: {app.state.edgar.configured}"
     )
 
-    app.state.scanner = MarketScanner(app.state.provider, app.state.db_pool)
+    app.state.scanner = MarketScanner(app.state.provider, app.state.db_pool, redis=app.state.redis)
     logger.info("✅ Scanner initialized")
 
     logger.info(f"Data Engine ready on port {settings.service_port}")
@@ -527,6 +527,9 @@ async def refresh_ticker_bars(ticker: str) -> dict:
 
     daily_count = await upsert_bars(app.state.db_pool, ticker, "1d", daily_bars)
     hourly_count = await upsert_bars(app.state.db_pool, ticker, "1h", hourly_bars)
+    # Today so far, from the same download (spec 4.8b decision 16). Fail-open.
+    from bar_session import stash_session_so_far
+    await stash_session_so_far(app.state.redis, ticker, _open_daily, daily_bars, now)
 
     del bulk_daily, bulk_hourly, df_daily, df_hourly, daily_bars, hourly_bars
     del _open_daily, _open_hourly
@@ -741,7 +744,13 @@ async def get_dossier(ticker: str, horizon: str = Query(HORIZON_SWING)):
         # retrieval, not the data (the 1.7 convention). A cached hit that
         # replayed the build's budget would claim upstream calls it never
         # made — the Part 2.5 live check caught exactly that.
-        return response.model_dump(mode="json", by_alias=True, exclude={"cached", "budget"})
+        body = response.model_dump(mode="json", by_alias=True, exclude={"cached", "budget"})
+        # Part 4.8b-de: today so far is attached at read time below, never
+        # stored in the cached document (a 15:55 body must not carry it past
+        # the close).
+        if isinstance(body.get("sections", {}).get("indicators"), dict):
+            body["sections"]["indicators"]["sessionSoFar"] = None
+        return body
 
     market_open = get_market_status()[0] == "market_open"
     started = _time.perf_counter()
@@ -775,6 +784,11 @@ async def get_dossier(ticker: str, horizon: str = Query(HORIZON_SWING)):
         f"calls={budget.upstream_calls} bySource={budget.by_source} "
         f"elapsed={budget.elapsed_ms}ms"
     )
+    from bar_session import read_session_so_far
+    indicators = body.get("sections", {}).get("indicators")
+    if isinstance(indicators, dict):
+        body = {**body, "sections": {**body["sections"], "indicators": {
+            **indicators, "sessionSoFar": await read_session_so_far(app.state.redis, ticker)}}}
     return DossierResponse.model_validate({
         **body,
         "cached": from_cache,

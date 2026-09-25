@@ -119,3 +119,70 @@ def test_importing_main_builds_no_calendar():
     )
     assert out.returncode == 0, out.stderr[-2000:]
     assert out.stdout.strip().splitlines()[-1] == "False 0"
+
+
+# ── sessionSoFar (spec 4.8b decision 16) ─────────────────────────
+
+from bar_session import read_session_so_far, session_so_far, stash_session_so_far  # noqa: E402
+from tests.fake_redis import FakeRedis  # noqa: E402
+
+
+def _prior(n=20, volume=1_000_000, close=100.0):
+    return [{"ts": datetime(2026, 8, 1 + i % 28), "open": close, "high": close, "low": close,
+             "close": close, "volume": volume} for i in range(n)]
+
+
+TODAY_ROW = {"ts": datetime(2026, 9, 24), "open": 101.0, "high": 103.0, "low": 99.5,
+             "close": 102.0, "volume": 600_000}
+
+
+def test_session_so_far_block():
+    """Hand values. 2026-09-24 opens 13:30Z, closes 20:00Z (390 min); at
+    16:45Z 195 min have run -> 0.5. Prior close 100 -> +2 %; 600,000 so far
+    over half a session against a 1,000,000 mean -> rvolScaled 1.2."""
+    block = session_so_far(TODAY_ROW, _prior(), utc(2026, 9, 24, 16, 45),
+                           utc(2026, 9, 24, 13, 30), utc(2026, 9, 24, 20, 0))
+    assert block == {"open": 101.0, "high": 103.0, "low": 99.5, "last": 102.0,
+                     "volumeSoFar": 600_000, "sessionElapsedFrac": 0.5,
+                     "changeVsPriorClosePct": 2.0, "rvolScaled": 1.2, "inProgress": True}
+    # Early close 2026-11-27: 14:30Z -> 18:00Z is 210 min; at 16:15Z, 105 min = 0.5.
+    early = session_so_far(TODAY_ROW, _prior(), utc(2026, 11, 27, 16, 15),
+                           utc(2026, 11, 27, 14, 30), utc(2026, 11, 27, 18, 0))
+    assert early["sessionElapsedFrac"] == 0.5 and early["rvolScaled"] == 1.2
+    # The first 5 minutes: no scaled RVOL. Fewer than 20 prior sessions: none either.
+    first = session_so_far(TODAY_ROW, _prior(), utc(2026, 9, 24, 13, 33),
+                           utc(2026, 9, 24, 13, 30), utc(2026, 9, 24, 20, 0))
+    assert first["rvolScaled"] is None and first["sessionElapsedFrac"] == pytest.approx(3 / 390)
+    short = session_so_far(TODAY_ROW, _prior(19), utc(2026, 9, 24, 16, 45),
+                           utc(2026, 9, 24, 13, 30), utc(2026, 9, 24, 20, 0))
+    assert short["rvolScaled"] is None and short["changeVsPriorClosePct"] == 2.0
+    assert session_so_far(TODAY_ROW, [], utc(2026, 9, 24, 16, 45), utc(2026, 9, 24, 13, 30),
+                          utc(2026, 9, 24, 20, 0))["changeVsPriorClosePct"] is None
+
+
+@pytest.mark.asyncio
+async def test_session_so_far_null_after_close():
+    """Stashed at 12:45 ET; read in the session it is served, read at or after
+    the close it is null whatever Redis still holds."""
+    redis = FakeRedis()
+    stored = await stash_session_so_far(redis, "AAPL", [TODAY_ROW], _prior(), utc(2026, 9, 24, 16, 45))
+    assert stored["rvolScaled"] == 1.2
+    assert await read_session_so_far(redis, "AAPL", utc(2026, 9, 24, 17, 0)) == stored
+    assert await read_session_so_far(redis, "AAPL", utc(2026, 9, 24, 20, 0)) is None
+    assert await read_session_so_far(redis, "AAPL", utc(2026, 9, 26, 15, 0)) is None   # Saturday
+
+
+@pytest.mark.asyncio
+async def test_session_so_far_absent_without_stash():
+    redis = FakeRedis()
+    assert await read_session_so_far(redis, "AAPL", utc(2026, 9, 24, 17, 0)) is None
+    assert await read_session_so_far(None, "AAPL", utc(2026, 9, 24, 17, 0)) is None
+    # Nothing is stashed pre-market (no session trades yet), without Redis,
+    # without a dropped row, or when Redis fails (fail-open, logged).
+    assert await stash_session_so_far(redis, "AAPL", [TODAY_ROW], _prior(), utc(2026, 9, 24, 12, 0)) is None
+    assert await stash_session_so_far(None, "AAPL", [TODAY_ROW], _prior(), utc(2026, 9, 24, 17, 0)) is None
+    assert await stash_session_so_far(redis, "AAPL", [], _prior(), utc(2026, 9, 24, 17, 0)) is None
+    assert redis.keys() == []
+    broken = FakeRedis(fail_on={"set", "get"})
+    assert await stash_session_so_far(broken, "AAPL", [TODAY_ROW], _prior(), utc(2026, 9, 24, 17, 0)) is None
+    assert await read_session_so_far(broken, "AAPL", utc(2026, 9, 24, 17, 0)) is None
