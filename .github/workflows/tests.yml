@@ -158,6 +158,7 @@ jobs:
               tests/test_wallclock.py
               tests/test_journal_loop.py
               tests/test_journal_stats.py
+              tests/test_reads.py
 
     steps:
       - uses: actions/checkout@v5
