@@ -239,6 +239,7 @@ services:
       # cache_control on the verdict's system block. Off until the live check
       # shows the prefix clears Sonnet 5's 1,024-token minimum (spec 4.4 d.12).
       LLM_VERDICT_CACHE: ${LLM_VERDICT_CACHE:-false}
+      LLM_CLASSIFIER_CACHE: ${LLM_CLASSIFIER_CACHE:-false}   # 4.8b-ai: cache_control on the classifier's system block; set only after a live cacheWrite
       # Which OpenRouter host(s) to try first, comma-separated, because a
       # prompt cache is per host. A preference, never a pin: the request always
       # allows fallbacks, and ai.llm_calls.host records who really served it.

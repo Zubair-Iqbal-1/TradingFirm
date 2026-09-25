@@ -1253,3 +1253,13 @@ On all four pre-expiry nights the 00:15 reading sat at ES −0.85…−0.95 / NQ
 
 **Supersedes:** N/A.
 
+---
+
+## 2026-09-25 — The $0.010952 Redis / ledger gap of 2026-09-21 is the pre-ledger `classify_live` spend; no fix
+
+**Decision:** `/usage`'s month total exceeds `sum(ai.llm_calls.cost_usd)` by $0.010952, all on 2026-09-21 (Redis `cost_day` 0.0831479 vs ledger 0.072194): 4.2's `classify_live.py` first live check ran that morning, before 4.4's ledger existed, and its cost went into Redis only. The startup seed takes `max(ledger, Redis)`, so `/usage` keeps it. Nothing is changed.
+
+**Why:** the gap is explained to the cent and predates the ledger; a backfilled row would be an invented wire record.
+
+**Supersedes:** N/A.
+
