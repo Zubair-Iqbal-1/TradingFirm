@@ -84,7 +84,7 @@ def test_plan_defaults():
     del body["waitFor"], body["contractWarnings"]                 # a row stored before 4.8b-ai
     p = Plan.model_validate(body)
     assert p.earnings_in_days is None
-    assert p.hold_through_earnings is False
+    assert p.hold_through_earnings is None, "Optional since the avoid rule (2026-09-25)"
     assert p.wait_for is None and p.contract_warnings == []
     v = verdict_json(verdict="avoid")
     del v["plan"], v["riskFlags"]

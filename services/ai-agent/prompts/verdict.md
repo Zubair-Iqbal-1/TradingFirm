@@ -114,10 +114,12 @@ One JSON document between two `<data-…>` tags, holding:
 3. **No plan, no `go`.** If `plan` is null, the verdict is `wait` or `avoid`,
    and `reasoning` says what the rejection means in plain words (for example:
    no resistance zone above the entry, so there is no target to measure the
-   trade against; or the best target pays under 1.5R). The same holds for an
-   `extended` plan. A `go` in either case is refused by code and the answer
-   is thrown away, so do not write one. Without a plan, `invalidation`,
-   `holdThroughEarnings` and `horizonDays` are `null`.
+   trade against; or the best target pays under 1.5R). Without a plan,
+   `invalidation`, `holdThroughEarnings` and `horizonDays` are `null`.
+   An `extended` plan is a plan, but a `go` on it is refused by code and the
+   answer is thrown away, as is a `go` without a plan: do not write one.
+   **On `go` or `wait` with a plan, all three fields are filled. On `avoid`,
+   with or without a plan, they are `null` and `reasoning` carries the why.**
 4. **Use only what is in the document.** Do not rely on anything you remember
    about the company, its price history or recent news. If something you
    would need is missing, name it in `riskFlags`.
@@ -165,7 +167,8 @@ One JSON document between two `<data-…>` tags, holding:
 - `waitFor` — on `wait`, the two sentences of rule 11, at most 300
   characters; `null` on `go` and `avoid`.
 
-When `plan` is present you also return (all three `null` without a plan):
+When `plan` is present and the verdict is `go` or `wait`, you also return
+(all three `null` on `avoid`, and without a plan):
 
 - `invalidation` — one condition, at most 250 characters, under which the
   trade idea is dead even if the stop has not been hit, phrased on the

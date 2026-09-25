@@ -1263,3 +1263,13 @@ On all four pre-expiry nights the 00:15 reading sat at ES −0.85…−0.95 / NQ
 
 **Supersedes:** N/A.
 
+---
+
+## 2026-09-25 — An `avoid` with a plan stores the levels and drops the three plan fields; the rejected answer's shape is logged
+
+**Decision:** `invalidation`, `holdThroughEarnings` and `horizonDays` are required only on `go` and `wait` when a plan exists. On `avoid` they are not required: whatever the model returns in them, and in `waitFor`, is dropped to null by `merge`, never a rejection, and plan math's levels are still stored in `plan_proposed` as built, so the journal can score what the avoided trade would have done. `Plan.invalidation`, `hold_through_earnings` and `horizon_days` are Optional with default None. The prompt says so (rule 3; the extended-plan sentence moved out of its null clause). A rejected answer's shape — its verdict and which fields were null or blank, never the text — is logged at ERROR.
+
+**Why:** the first paid `avoid` on a valid plan (PPLI, 2026-09-25, all four trend checks ✗) came back with `invalidation` null under the single schema and was thrown away at $0.0289, with nothing logged but the rule it broke.
+
+**Supersedes:** spec 4.8b decision 8's "a null plan field on a plan answer" rejection, now `go` and `wait` only; spec 4.8b-ai decision 8 the same.
+

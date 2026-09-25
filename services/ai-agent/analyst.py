@@ -301,7 +301,8 @@ async def run(state, settings, ticker: str, horizon: str, entry: Optional[float]
         except analyze.VerdictRejected as e:
             await ledger.record(pool, redis, ledger.build(
                 outcome="bad_response", result=result, **ledger_kw))
-            logger.error(f"/analyze {ticker}: unusable verdict ({e})")
+            logger.error(f"/analyze {ticker}: unusable verdict ({e}); answer shape: "
+                         f"{analyze.answer_shape(result.data)}")
             raise AnalyzeError(502, f"VerdictRejected: {e}") from None
 
         # 4.8b-ai: the soft checks — warnings on the response and, with a
@@ -311,7 +312,7 @@ async def run(state, settings, ticker: str, horizon: str, entry: Optional[float]
                                        zones=analyze.tagged_zones(zones))
         for warning in warnings:
             logger.warning(f"/analyze {ticker}: contract warning: {warning}")
-        wait_for = analyze.wait_for_text(result.data)
+        wait_for = None if verdict.verdict == "avoid" else analyze.wait_for_text(result.data)
         body = verdict.model_dump(by_alias=True)
         if body["plan"] is not None:
             body["plan"]["contractWarnings"] = warnings

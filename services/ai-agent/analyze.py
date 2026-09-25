@@ -446,6 +446,19 @@ def _words(text: str) -> list[str]:
     return re.sub(r"[^a-z0-9]+", " ", text.lower()).split()
 
 
+def answer_shape(answer: Any) -> str:
+    """What a rejected answer looked like, for the ERROR log: its verdict and
+    which fields were null or blank. Never a value: the text may be anything
+    (2026-09-25)."""
+    if not isinstance(answer, dict):
+        return f"type={type(answer).__name__}"
+    nulls = sorted(k for k, v in answer.items() if v is None)
+    blanks = sorted(k for k, v in answer.items() if isinstance(v, str) and not v.strip())
+    verdict = answer.get("verdict")
+    verdict = verdict if verdict in ("go", "wait", "avoid") else f"<{type(verdict).__name__}>"
+    return f"verdict={verdict} keys={len(answer)} nulls={nulls} blanks={blanks}"
+
+
 def _blank(value: Any) -> bool:
     """None, or a string with nothing in it: what a nullable text field reads
     as "not given" under the single schema."""
@@ -481,6 +494,11 @@ def merge(answer: dict, plan: Union[PlanMath, PlanRejected], earnings_in_days: O
         raise VerdictRejected("answer is not an object")
     has_plan = isinstance(plan, PlanMath)
     flags = _texts(answer.get("riskFlags"), verdict_model.FLAG_MAX, "riskFlags")
+    # An avoid with a plan (2026-09-25, the change to spec 4.8b decision 8):
+    # the three plan fields and waitFor are dropped to null, never a
+    # rejection; the levels are stored as built so the journal can score
+    # the trade not taken. go and wait keep the non-blank requirement.
+    avoid = answer.get("verdict") == "avoid"
 
     plan_json = None
     if has_plan:
@@ -489,7 +507,7 @@ def merge(answer: dict, plan: Union[PlanMath, PlanRejected], earnings_in_days: O
             "stop": plan.stop,
             "stopBasis": plan.stop_basis,
             "disasterLine": plan.disaster_line,
-            "invalidation": _text(answer.get("invalidation"), verdict_model.BULLET_MAX, "invalidation"),
+            "invalidation": None if avoid else _text(answer.get("invalidation"), verdict_model.BULLET_MAX, "invalidation"),
             "targets": [{"price": t.price, "r": t.r, "basis": t.basis} for t in plan.targets],
             "overhead": [{"price": t.price, "r": t.r, "basis": t.basis} for t in plan.overhead],
             "sizeShares": plan.size_shares,
@@ -498,16 +516,17 @@ def merge(answer: dict, plan: Union[PlanMath, PlanRejected], earnings_in_days: O
             "extended": plan.extended,
             "entryForMaxRisk": plan.entry_for_max_risk,
             "earningsInDays": earnings_in_days,
-            "holdThroughEarnings": answer.get("holdThroughEarnings"),
-            "horizonDays": answer.get("horizonDays"),
+            "holdThroughEarnings": None if avoid else answer.get("holdThroughEarnings"),
+            "horizonDays": None if avoid else answer.get("horizonDays"),
             # 4.8b-ai: stored with the plan; the route fills contractWarnings
             # on the dumped body after soft_checks
-            "waitFor": wait_for_text(answer),
+            "waitFor": None if avoid else wait_for_text(answer),
         }
-        if not isinstance(plan_json["holdThroughEarnings"], bool):
-            raise VerdictRejected("holdThroughEarnings is not a boolean")
-        if plan_json["horizonDays"] is None:
-            raise VerdictRejected("horizonDays is null on an answer with a plan")
+        if not avoid:
+            if not isinstance(plan_json["holdThroughEarnings"], bool):
+                raise VerdictRejected("holdThroughEarnings is not a boolean")
+            if plan_json["horizonDays"] is None:
+                raise VerdictRejected("horizonDays is null on an answer with a plan")
         if plan.extended and answer.get("verdict") == "go":
             raise VerdictRejected("go on an extended plan")
     else:
@@ -587,7 +606,8 @@ def soft_checks(verdict: Verdict, answer: dict, *, raised_flags: list[str], zone
         found = NUMBER_RE.findall(verdict.plan.invalidation or "")
         if found:
             warnings.append(f"invalidation carries a number: {found[0]}")
-    wait_for = wait_for_text(answer if isinstance(answer, dict) else {})
+    # an avoid's waitFor is dropped (2026-09-25), so there is nothing to check
+    wait_for = None if verdict.verdict == "avoid" else wait_for_text(answer if isinstance(answer, dict) else {})
     if verdict.plan is not None and verdict.verdict == "wait" and wait_for is None:
         warnings.append("waitFor blank on wait with a plan")
     if wait_for is not None:

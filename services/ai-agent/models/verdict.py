@@ -57,7 +57,10 @@ class Plan(BaseModel):
     stop: float = Field(gt=0)
     stop_basis: Basis = Field(alias="stopBasis")
     disaster_line: float = Field(gt=0, alias="disasterLine")
-    invalidation: Bullet
+    # Required on go and wait (merge enforces it); null on an avoid, whose
+    # levels are still stored so the journal can score the trade not taken
+    # (2026-09-25, the change to spec 4.8b decision 8).
+    invalidation: Optional[Bullet] = None
     targets: list[Target] = Field(min_length=1, max_length=TARGETS_MAX)
     # 4.8a: resistance between the entry and T1 that pays under 1.5R (or sits
     # in a zone straddling the entry). Empty on rows stored before 4.8a.
@@ -72,8 +75,8 @@ class Plan(BaseModel):
     extended: bool = False
     entry_for_max_risk: Optional[float] = Field(default=None, gt=0, alias="entryForMaxRisk")
     earnings_in_days: Optional[int] = Field(default=None, ge=0, alias="earningsInDays")
-    hold_through_earnings: bool = Field(default=False, alias="holdThroughEarnings")
-    horizon_days: int = Field(ge=1, le=HORIZON_DAYS_MAX, alias="horizonDays")
+    hold_through_earnings: Optional[bool] = Field(default=None, alias="holdThroughEarnings")
+    horizon_days: Optional[int] = Field(default=None, ge=1, le=HORIZON_DAYS_MAX, alias="horizonDays")
     # 4.8b-ai: on `wait`, what blocks `go` now and the level to wait for (a
     # level the plan or the zone list printed, never the model's own — checked
     # softly); the soft-check warnings the answer earned. Both optional so

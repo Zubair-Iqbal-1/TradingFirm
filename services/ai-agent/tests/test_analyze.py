@@ -461,6 +461,35 @@ def test_analyze_prefilters_before_the_classifier(app):
     assert out["classifier"]["classified"] == 14 and out["stored"] is True
 
 
+def test_rejected_answer_shape_is_logged(app, caplog):
+    """A rejected answer's shape (verdict, null and blank fields) is logged
+    at ERROR; the text never is (2026-09-25)."""
+    bad = {**WAIT_PLAN, "invalidation": None, "reasoning": "SECRET-SAUCE reasoning text"}
+    client, _, state = app(provider=Provider(verdict=bad))
+    with caplog.at_level("ERROR"):
+        resp = post(client)
+    assert resp.status_code == 502 and "VerdictRejected" in resp.json()["detail"]
+    line = [r.message for r in caplog.records if "unusable verdict" in r.message][0]
+    assert "answer shape: verdict=wait keys=10 nulls=['invalidation'] blanks=[]" in line
+    assert "SECRET-SAUCE" not in caplog.text
+    assert state.db_pool.row is None
+
+
+def test_avoid_with_plan_is_stored_with_its_levels(app):
+    """The route: an avoid on a valid plan stores plan_proposed with plan
+    math's levels and the three fields null; waitFor dropped."""
+    avoid = {**WAIT_PLAN, "verdict": "avoid", "invalidation": None, "holdThroughEarnings": None,
+             "horizonDays": None, "waitFor": "dropped on avoid"}
+    client, _, state = app(provider=Provider(verdict=avoid))
+    out = post(client).json()
+    assert out["stored"] is True and out["verdict"]["verdict"] == "avoid"
+    stored = json.loads(state.db_pool.row["plan_proposed"])
+    assert (stored["stop"], stored["targets"][0]["price"], stored["extended"]) == (46.6, 56.9, True)
+    assert (stored["invalidation"], stored["holdThroughEarnings"], stored["horizonDays"], stored["waitFor"]) == (
+        None, None, None, None)
+    assert out["waitFor"] is None and out["contractWarnings"] == [], "dropped on avoid, response and row alike"
+
+
 def test_contract_warnings_stored_and_returned(app):
     """4.8b-ai decision 9: the soft checks reach the response and, with a
     plan, plan_proposed; a cache hit answers the stored list; nothing is

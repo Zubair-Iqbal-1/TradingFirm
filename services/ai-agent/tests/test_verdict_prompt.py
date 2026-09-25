@@ -223,10 +223,56 @@ def test_merge_refuses_plan_fields_without_plan(field, value):
     assert blank.plan is None, "a blank string reads as null"
 
 
+@pytest.mark.parametrize("verdict, plan", [("wait", plan_a), ("go", plan_near)])
 @pytest.mark.parametrize("field", ["invalidation", "holdThroughEarnings", "horizonDays"])
-def test_merge_refuses_null_plan_fields_with_plan(field):
+def test_merge_refuses_null_plan_fields_with_plan(verdict, plan, field):
+    """go and wait only: an avoid drops them (the 2026-09-25 change)."""
     with pytest.raises(analyze.VerdictRejected):
-        analyze.merge({**ANSWER, field: None}, plan_a(), 38)
+        analyze.merge({**ANSWER, "verdict": verdict, field: None}, plan(), 38)
+
+
+def test_wait_with_plan_still_requires_fields():
+    for field in ("invalidation", "holdThroughEarnings", "horizonDays"):
+        with pytest.raises(analyze.VerdictRejected):
+            analyze.merge({**ANSWER, field: None}, plan_a(), 38)
+    with pytest.raises(analyze.VerdictRejected):
+        analyze.merge({**ANSWER, "invalidation": "  "}, plan_a(), 38)
+    ok = analyze.merge(ANSWER, plan_a(), 38)
+    assert (ok.plan.invalidation, ok.plan.hold_through_earnings, ok.plan.horizon_days) == (
+        "daily close below the 20 EMA", False, 10)
+
+
+def test_avoid_with_plan_stores_levels_and_null_fields():
+    """PPLI 2026-09-25: an avoid on a valid plan came back with invalidation
+    null and was rejected. Now the levels are stored as plan math built them
+    (the journal scores the trade not taken) and the three fields are null."""
+    answer = {**ANSWER, "verdict": "avoid", "invalidation": None, "holdThroughEarnings": None,
+              "horizonDays": None, "waitFor": None}
+    verdict = analyze.merge(answer, plan_a(), 38)
+    plan = verdict.model_dump(by_alias=True)["plan"]
+    assert (verdict.verdict, plan["entry"], plan["stop"], plan["disasterLine"]) == ("avoid", 50.0, 46.6, 45.4)
+    assert plan["targets"][0]["price"] == 56.9 and plan["overhead"][0]["price"] == 53.9
+    assert plan["extended"] is True and plan["entryForMaxRisk"] == 49.0 and plan["earningsInDays"] == 38
+    assert (plan["invalidation"], plan["holdThroughEarnings"], plan["horizonDays"], plan["waitFor"]) == (
+        None, None, None, None)
+    assert analyze.soft_checks(verdict, answer, raised_flags=[], zones=[]) == []
+
+
+def test_avoid_plan_fields_dropped_not_rejected():
+    """Whatever the model puts in the three fields (or waitFor) on an avoid
+    is dropped to null, never a rejection, never stored."""
+    noisy = {**ANSWER, "verdict": "avoid", "invalidation": "", "holdThroughEarnings": "no",
+             "horizonDays": 999, "waitFor": "Wait for 12.34, my own level."}
+    verdict = analyze.merge(noisy, plan_a(), 38)
+    plan = verdict.plan
+    assert (plan.invalidation, plan.hold_through_earnings, plan.horizon_days, plan.wait_for) == (
+        None, None, None, None)
+    assert plan.stop == 46.6, "the levels are plan math's, untouched"
+    assert analyze.soft_checks(verdict, noisy, raised_flags=[], zones=[]) == [], "nothing left to check"
+    # the shape line the route logs for a rejection names fields, never text
+    shape = analyze.answer_shape({**ANSWER, "invalidation": None, "waitFor": "  "})
+    assert shape == "verdict=wait keys=10 nulls=['invalidation'] blanks=['waitFor']"
+    assert "20 EMA" not in shape and analyze.answer_shape(["x"]) == "type=list"
 
 
 def test_wait_for_is_stored_in_plan_proposed():
@@ -523,7 +569,7 @@ def test_verdict_prompt_ships_and_states_the_rules():
                    "`Days` is a count of trading days", "`Shares` is a share count",
                    "`closesBelowEma20` and `ema20Crosses40` are counts of bars",
                    "`open`, `last`\n  and the `swingLows` are prices in dollars",
-                   "A `go` in either case is refused by code", "`newsPrefiltered`"):
+                   "a `go` on it is refused by code", "`newsPrefiltered`"):
         assert phrase in text, phrase
     assert len(analyze.prompt_sha(text)) == 16
 
@@ -542,6 +588,15 @@ def test_prompt_names_flag_citation_rule():
 def reads_flags():
     import reads
     return reads.FLAGS
+
+
+def test_prompt_says_avoid_needs_no_plan_fields():
+    text = prompts.load(prompts.VERDICT)
+    assert ("**On `go` or `wait` with a plan, all three fields are filled. On `avoid`,\n"
+            "   with or without a plan, they are `null` and `reasoning` carries the why.**") in text
+    assert "An `extended` plan is a plan, but a `go` on it is refused by code" in text
+    assert "(all three `null` on `avoid`, and without a plan)" in text
+    assert "The same holds for an\n   `extended` plan" not in text, "moved out of rule 3's null clause"
 
 
 def test_prompt_names_wait_for_rule():
