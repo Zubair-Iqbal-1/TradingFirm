@@ -954,6 +954,12 @@ SENTIMENT_MODEL_MAX = 100
 # an older ai-agent during a deploy carry none), validated when present.
 SENTIMENT_EVENT_KEY_MAX = 80
 SENTIMENT_EVENT_KEY_RE = r"^[a-z0-9]+(-[a-z0-9]+){1,7}$"
+# Part 4.8b-de: the date the event itself happened or is scheduled, when the
+# headline states one (the classifier's `eventDate`, rehash layer 3). Optional
+# (labels before 4.8b, and ai-agent before 4.8b-ai, send none); an explicit
+# null (no date stated) is stored as null, so it stays distinct from absent.
+# ai-agent keeps a copy in classifier.ITEM_LIMITS from 4.8b-ai.
+SENTIMENT_EVENT_DATE_RE = r"^\d{4}-\d{2}-\d{2}$"
 
 
 def _decode_sentiment(raw):
@@ -984,6 +990,15 @@ class NewsSentimentRequest(BaseModel):
     eventKey: Optional[str] = Field(
         default=None, max_length=SENTIMENT_EVENT_KEY_MAX, pattern=SENTIMENT_EVENT_KEY_RE
     )
+    eventDate: Optional[str] = Field(default=None, pattern=SENTIMENT_EVENT_DATE_RE)
+
+    @field_validator("eventDate")
+    @classmethod
+    def _real_date(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None:
+            from datetime import date
+            date.fromisoformat(value)          # 2026-02-30 is a ValueError -> 422
+        return value
 
     @field_validator("relevance")
     @classmethod
@@ -1035,6 +1050,8 @@ async def set_news_sentiment_route(news_id: int, body: NewsSentimentRequest):
     }
     if body.eventKey is not None:
         value["eventKey"] = body.eventKey
+    if "eventDate" in body.model_fields_set:
+        value["eventDate"] = body.eventDate
     try:
         updated = await set_news_sentiment(pool, news_id, value)
     except (*DB_ERRORS, TimeoutError) as e:

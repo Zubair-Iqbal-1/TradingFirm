@@ -214,7 +214,43 @@ def test_sentiment_event_key_optional_and_validated(client, key, status):
         conn.fetchrow.assert_not_awaited()
 
 
+_ABSENT = object()
+
+
+@pytest.mark.parametrize("value, status", [
+    (_ABSENT, 200),                               # absent: labels before 4.8b
+    (None, 200),                                  # the classifier found no date
+    ("2026-09-16", 200),
+    ("2026-12-31", 200),                          # a scheduled event may be ahead
+    ("2026-02-30", 422),                          # not a real date
+    ("2026-9-16", 422),
+    ("2026-09-16T00:00:00Z", 422),                # a date, never an instant
+    ("16/09/2026", 422),
+    ("", 422),
+    (20260916, 422),
+])
+def test_event_date_optional_in_sentiment_contract(client, value, status):
+    """Part 4.8b-de (spec 4.8b decision 10, layer 3): eventDate is optional,
+    an ISO date or null when sent; the stored label carries it exactly when
+    it was sent, null included, so "no date stated" differs from "older label"."""
+    pool, conn = _pool()
+    body = dict(BODY) if value is _ABSENT else {**BODY, "eventDate": value}
+    resp = client(pool).post("/news/41/sentiment", json=body)
+    assert resp.status_code == status
+    if status == 200:
+        stored = json.loads(conn.fetchrow.await_args.args[2])
+        assert ("eventDate" in stored) is (value is not _ABSENT)
+        if value is not _ABSENT:
+            assert stored["eventDate"] == value
+    else:
+        conn.fetchrow.assert_not_awaited()
+
+
 def test_sentiment_contract_pinned_to_spec():
+    assert main.SENTIMENT_EVENT_DATE_RE == r"^\d{4}-\d{2}-\d{2}$", (
+        "ai-agent's classifier.ITEM_LIMITS['eventDate'] keeps a copy from 4.8b-ai "
+        "(spec 4.8b decision 10). Change both or neither."
+    )
     assert (main.SENTIMENT_EVENT_KEY_MAX, main.SENTIMENT_EVENT_KEY_RE) == (
         80, r"^[a-z0-9]+(-[a-z0-9]+){1,7}$"), (
         "ai-agent's classifier.EVENT_KEY_MAX / EVENT_KEY_RE keep a copy "
