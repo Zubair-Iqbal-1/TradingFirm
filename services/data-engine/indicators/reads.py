@@ -54,8 +54,9 @@ def volume_read(close: pd.Series, volume: pd.Series, zones: list, dates) -> dict
     and the pullback run ending at the last bar (spec 4.8b decision 2).
 
     `zones` are levels.Zone objects (either side). A breakout counts only a
-    zone that has held from below at least as often as it broke
-    (`held_below >= broke_below`, approval answer 1)."""
+    zone that has held from below more often than it broke
+    (`held_below > broke_below`: a 2 / 2 wall is not a ceiling; Zubair's fix
+    of 2026-09-25 to approval answer 1's `>=`)."""
     out = {"up_days5_rvol": None, "down_days5_rvol": None, "breakout": None,
            "pullback_days": 0, "pullback_rvol": None}
     if len(close) < 2:
@@ -70,7 +71,7 @@ def volume_read(close: pd.Series, volume: pd.Series, zones: list, dates) -> dict
     if len(down) == UPDOWN_DAYS:
         out["down_days5_rvol"] = _num(down.mean())
 
-    eligible = [z for z in zones if z.held_below >= z.broke_below]
+    eligible = [z for z in zones if z.held_below > z.broke_below]
     n = len(close)
     for k in range(n - 1, max(n - 1 - BREAKOUT_BARS, 0), -1):
         prev, cur = close.iloc[k - 1], close.iloc[k]

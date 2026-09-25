@@ -71,14 +71,14 @@ def test_volume_read_up_down_days():
 
 def test_volume_read_breakout_newest_in_last_five():
     """Closes ... 49, 50, 51, 52, 53, 54. Zone A 50.4-50.5 (held 3 / broke 1
-    from below) is cleared by the 51 bar; zone B 52.2-52.6 (2 / 2, a tie:
-    eligible) by the 53 bar, which is newer, so B wins. Zone C 53.5-53.8
-    (1 / 3) is cleared by the last bar but has broken more than it held."""
+    from below) is cleared by the 51 bar; zone B 52.2-52.6 (3 / 2) by the 53
+    bar, which is newer, so B wins. Zone C 53.5-53.8 (2 / 2, a tie) is
+    cleared by the last bar but a tie is not eligible: held > broke only."""
     closes = [49.0] * 30 + [50.0, 51.0, 52.0, 53.0, 54.0]
     vol = [100] * 33 + [300, 100]
     idx = series(closes).index
     out = volume_read(series(closes), series(vol), [
-        zone(50.4, 50.5, 3, 1), zone(52.2, 52.6, 2, 2), zone(53.5, 53.8, 1, 3)], idx)
+        zone(50.4, 50.5, 3, 1), zone(52.2, 52.6, 3, 2), zone(53.5, 53.8, 2, 2)], idx)
     assert out["breakout"] == {"date": idx[-2].date().isoformat(), "low": 52.2, "high": 52.6,
                                "bar_rvol": pytest.approx(3.0)}
 
@@ -221,11 +221,10 @@ def test_reads_nan_bars_ignored():
 # ── The eleven stored verdicts (spec 4.8b decision 3) ────────────
 
 # (verdict, ticker, asOf, move30Atr, range30Atr, closesBelowEma20, lowerHighs)
-# — the 09-24 rerun's table, reproduced to the digit. Then the other
-# zone-free reads the same bars give (the breakout reads zones built on the
-# full ~500-bar history, which a 300-bar fixture cannot rebuild: it is
-# covered by the synthetic tests above and reported on the full history in
-# the 4.8b-de report).
+# — the 09-24 rerun's table, reproduced to the digit. Then the other reads
+# the same bars give. The breakout reads zones built on the full ~500-bar
+# history, which a 300-bar fixture cannot rebuild, so each fixture carries
+# that history's zones per asOf (low / high / heldBelow / brokeBelow).
 ELEVEN = [
     ("3c31ff2c", "AAPL", "2026-09-21", 3.42, 5.16, 4, False),
     ("becd874d", "AAPL", "2026-09-21", 3.42, 5.16, 4, False),
@@ -242,6 +241,21 @@ ELEVEN = [
 
 # ticker/asOf -> (stackUp, ema20Rising10, higherLows, up5, down5, pullbackDays,
 #                 range low, range high, posFrac, ema20Crosses40)
+# ticker/asOf -> the newest breakout on held > broke zones: (date, low, high,
+# bar RVOL), or None. 5 of the 11 verdicts; bar RVOL < 1 only on AAL.
+BREAKOUTS = {
+    ("AAPL", "2026-09-21"): None,
+    ("GOOGL", "2026-09-21"): ("2026-09-18", 344.46, 348.32, 1.99),
+    ("OUST", "2026-09-21"): None,
+    ("AAL", "2026-09-21"): ("2026-09-18", 12.79, 12.95, 0.74),
+    ("IAG", "2026-09-21"): None,
+    ("OPCH", "2026-09-21"): ("2026-09-16", 23.83, 24.16, 2.23),
+    ("CNK", "2026-09-21"): None,
+    ("MSFT", "2026-09-21"): ("2026-09-21", 489.20, 493.81, 1.33),
+    ("RIOT", "2026-09-21"): ("2026-09-21", 23.49, 23.93, 1.40),
+    ("OUST", "2026-09-22"): None,
+}
+
 OTHER_READS = {
     ("AAPL", "2026-09-21"): (True, True, True, 0.93, 1.28, 0, 273.51, 344.27, 0.93, 6),
     ("GOOGL", "2026-09-21"): (False, True, True, 1.33, 1.05, 0, 314.70, 384.23, 0.58, 7),
@@ -256,6 +270,11 @@ OTHER_READS = {
 }
 
 
+def _fixture_zones(ticker, as_of):
+    doc = json.loads((FIXTURES / f"{ticker}.json").read_text())
+    return [zone(z["low"], z["high"], z["heldBelow"], z["brokeBelow"]) for z in doc["zones"][as_of]]
+
+
 def _fixture_frame(ticker, as_of):
     doc = json.loads((FIXTURES / f"{ticker}.json").read_text())
     rows = [r for r in doc["bars"] if r[0] <= as_of]
@@ -267,6 +286,8 @@ def _fixture_frame(ticker, as_of):
 
 @pytest.mark.parametrize("verdict,ticker,as_of,move,span,below,lower", ELEVEN)
 def test_momentum_read_reproduces_the_eleven(verdict, ticker, as_of, move, span, below, lower):
+    """Also the breakout on each fixture's own zones: 5 / 11 (spec 4.8b
+    decision 2 as fixed 2026-09-25)."""
     df = _fixture_frame(ticker, as_of)
     assert df.index[-1].date().isoformat() == as_of
     m = momentum_read(df["High"], df["Low"], df["Close"])
@@ -276,9 +297,12 @@ def test_momentum_read_reproduces_the_eleven(verdict, ticker, as_of, move, span,
     stack, rising, hl, up5, down5, pb, lo, hi, pos, crosses = OTHER_READS[(ticker, as_of)]
     t = trend_read(df["High"], df["Low"], df["Close"])
     assert (t["stack_up"], t["ema20_rising10"], t["higher_lows"]) == (stack, rising, hl), verdict
-    v = volume_read(df["Close"], df["Volume"].astype(float), [], df.index)
+    v = volume_read(df["Close"], df["Volume"].astype(float), _fixture_zones(ticker, as_of), df.index)
     assert (round(v["up_days5_rvol"], 2), round(v["down_days5_rvol"], 2), v["pullback_days"]) == (
         up5, down5, pb), verdict
+    b = v["breakout"]
+    got = None if b is None else (b["date"], round(b["low"], 2), round(b["high"], 2), round(b["bar_rvol"], 2))
+    assert got == BREAKOUTS[(ticker, as_of)], verdict
     r = range_read(df["High"], df["Low"], df["Close"])
     assert (round(r["low"], 2), round(r["high"], 2), round(r["pos_frac"], 2),
             r["ema20_crosses40"], r["closed_outside"]) == (lo, hi, pos, crosses, False), verdict

@@ -1202,3 +1202,13 @@ On all four pre-expiry nights the 00:15 reading sat at ES −0.85…−0.95 / NQ
 **Why:** AAPL's verdicts of 2026-09-21 read `rvol` 0.45 on a stored partial day that closed at 0.80; every later reader took the row as a closed bar.
 
 **Supersedes:** N/A.
+
+---
+
+## 2026-09-25 — A breakout needs `heldBelow > brokeBelow`, strict
+
+**Decision:** `volumeRead.breakout` counts only a zone that has held from below more often than it broke. On the eleven: a breakout on 5 of 11, and a sub-1.0 breakout bar only on AAL (12.79–12.95, 0.74 on 09-18).
+
+**Why:** a 2 / 2 wall is not a ceiling. Under `≥` the ties (AAPL 2 / 2, CNK 2 / 2, OUST 4 / 4) left a breakout on 9 of 11.
+
+**Supersedes:** the `heldBelow ≥ brokeBelow` of the entry "4.8b splits into 4.8b-de and 4.8b-ai" above.
