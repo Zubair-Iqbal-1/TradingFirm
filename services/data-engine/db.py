@@ -313,6 +313,23 @@ GET_NEWS_LABELS_SQL = """
 """
 
 
+GET_NEWS_TITLES_SQL = """
+    SELECT id, published_at, title
+    FROM data_engine.news_items
+    WHERE ticker = $1 AND published_at < $2 AND published_at >= $3
+"""
+
+
+async def get_news_titles(pool: asyncpg.Pool, ticker: str, older_than: datetime,
+                          since: datetime) -> list[dict]:
+    """Stored headlines of `ticker` published in [since, older_than): what
+    rehash layer 1 compares a fresh title against (Part 4.8b-de). Read-only,
+    one statement, served by news_items_ticker_published_idx."""
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(GET_NEWS_TITLES_SQL, ticker, older_than, since)
+    return [dict(row) for row in rows]
+
+
 def decode_sentiment(raw) -> Optional[dict]:
     """jsonb arrives as text (no codec is registered). A sentiment that will
     not parse reads as null rather than failing the whole list — the same

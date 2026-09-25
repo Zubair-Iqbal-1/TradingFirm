@@ -96,7 +96,11 @@ class FakePool:
     """Answers by SQL shape: bars, events, stocks. Records every write."""
 
     def __init__(self, *, bars=None, events=None, stock=None, raise_on=None,
-                 labels=None):
+                 labels=None, old_news=None):
+        # Part 4.8b-de: stored headlines the rehash read returns; `fetch_args`
+        # records every fetch's parameters.
+        self.old_news = old_news or []
+        self.fetch_args: list[tuple] = []
         # {url: sentiment-or-None}: what the store already holds for a url.
         # Every url asked for gets an id, the way upsert_news just stored it.
         self.labels = labels or {}
@@ -126,6 +130,9 @@ class FakePool:
 
     async def _fetch(self, query, *args):
         self._guard(query)
+        self.fetch_args.append((query, args))
+        if "news_items" in query and "published_at <" in query:
+            return self.old_news
         if "news_items" in query:
             return [
                 {"id": 1000 + i, "url": url,
@@ -1131,7 +1138,8 @@ async def test_dossier_news_carries_id_and_sentiment(_no_network):
     assert by_url[labelled_url].sentiment == label
     assert all(i.sentiment is None for i in items if i.url != labelled_url)
     sql = [q for q in pool.reads if "news_items" in q and "SELECT" in q]
-    assert sql == [db.GET_NEWS_LABELS_SQL]
+    # 4.8b-de: the rehash read (layer 1) is the second news SELECT.
+    assert sql == [db.GET_NEWS_LABELS_SQL, db.GET_NEWS_TITLES_SQL]
     assert "url = ANY($2::text[])" in sql[0] and "ticker = $1" in sql[0]
 
 
@@ -1184,3 +1192,98 @@ def test_dossier_session_so_far_attached_at_read_time(_no_network, app_state, mo
     monkeypatch.setattr(bar_session, "utc_now", lambda: datetime(2026, 9, 9, 20, 5, tzinfo=timezone.utc))
     second = _get().json()
     assert second["cached"] is True and second["sections"]["indicators"]["sessionSoFar"] is None
+
+
+# ── Part 4.8b-de: rehash layer 1 (spec 4.8b decision 10) ────────────────
+
+def test_news_tokens_normalization():
+    from dossier.rehash import news_tokens
+
+    assert news_tokens("Riot Platforms: The $9.1 Billion AI Deal Changes The Story", "RIOT") == {
+        "platforms", "billion", "deal", "changes", "story"}
+    assert news_tokens("AAPL stock: Apple's iPhone 18 launch", "aapl") == {"apple", "iphone", "launch"}
+    assert news_tokens(None) == frozenset() and news_tokens("") == frozenset()
+
+
+def _news_item(title):
+    return {"id": 1, "published_at": NOW - timedelta(days=30), "title": title}
+
+
+@pytest.mark.asyncio
+async def test_rehash_of_marks_overlap(_no_network):
+    """A kept headline sharing most of its words with a stored one older than
+    14 days carries rehashOf: that row, its date, the Jaccard share. Title 3
+    of the fixture has 13 words after normalization; the stored title keeps
+    11 of them and adds one: 11 / 14 = 0.786."""
+    from dossier.rehash import news_tokens
+
+    news = _fixture("finnhub", "AAPL_news.json")
+    title = news[3]["headline"]
+    words = sorted(news_tokens(title, TICKER))
+    stored_title = " ".join(words[:11] + ["retold"])
+    _mount_all(_no_network)
+    old = {"id": 777, "published_at": NOW - timedelta(days=40), "title": stored_title}
+    pool = FakePool(bars={(TICKER, "1d"): _bars(60, TODAY)}, old_news=[old])
+
+    d = await assemble(_ctx(pool=pool), TICKER, HORIZON_SWING)
+
+    by_url = {i.url: i for i in d.sections.news.items}
+    mark = by_url[news[3]["url"]].rehash_of
+    assert len(words) == 13
+    assert mark is not None and mark.id == 777 and mark.published_at == old["published_at"]
+    assert mark.overlap_frac == pytest.approx(11 / 14)
+    assert sum(1 for i in d.sections.news.items if i.rehash_of is not None) == 1
+    body = d.model_dump(mode="json", by_alias=True)
+    assert body["sections"]["news"]["items"][0].keys() >= {"rehashOf"}
+
+
+@pytest.mark.asyncio
+async def test_rehash_of_ignores_recent_rows(_no_network):
+    """The read asks only for rows published in [now - 180 d, now - 14 d):
+    the database does the age cut, with these two bounds."""
+    _mount_all(_no_network)
+    pool = FakePool(bars={(TICKER, "1d"): _bars(60, TODAY)})
+    await assemble(_ctx(pool=pool), TICKER, HORIZON_SWING)
+    args = [a for q, a in pool.fetch_args if q == db.GET_NEWS_TITLES_SQL]
+    assert args == [(TICKER, NOW - timedelta(days=14), NOW - timedelta(days=180))]
+
+
+@pytest.mark.asyncio
+async def test_rehash_of_below_threshold(_no_network):
+    """Three shared words is under the 4-word floor; four shared words out
+    of a large union is under the 0.5 Jaccard line: neither marks."""
+    from dossier.rehash import best_match, news_tokens
+
+    news = _fixture("finnhub", "AAPL_news.json")
+    title = news[3]["headline"]
+    words = sorted(news_tokens(title, TICKER))
+    three = _news_item(" ".join(words[:3]))
+    four_of_many = _news_item(" ".join(words[:4] + [f"other{k}" for k in range(20)]))
+    assert best_match(title, TICKER, [three]) is None
+    assert best_match(title, TICKER, [four_of_many]) is None
+    assert best_match("", TICKER, [three]) is None
+    _mount_all(_no_network)
+    pool = FakePool(bars={(TICKER, "1d"): _bars(60, TODAY)}, old_news=[three, four_of_many])
+    d = await assemble(_ctx(pool=pool), TICKER, HORIZON_SWING)
+    assert all(i.rehash_of is None for i in d.sections.news.items)
+
+
+@pytest.mark.asyncio
+async def test_rehash_lookup_db_failure_is_503(_no_network):
+    """The rehash read raising is a dead database like the label read: it
+    leaves assemble() as a DB error, which the endpoint answers 503."""
+    import asyncpg
+    _mount_all(_no_network)
+    pool = FakePool(bars={(TICKER, "1d"): _bars(60, TODAY)}, raise_on="published_at <")
+    with pytest.raises(asyncpg.PostgresError):
+        await assemble(_ctx(pool=pool), TICKER, HORIZON_SWING)
+    assert isinstance(asyncpg.PostgresError("x"), db.DB_ERRORS)
+
+
+@pytest.mark.asyncio
+async def test_rehash_of_without_pool(_no_network):
+    from dossier.assemble import build_news
+
+    _mount_finnhub(_no_network)
+    section = await build_news(_ctx(pool=None), TICKER, HORIZON_PROFILES[HORIZON_SWING])
+    assert section.items and all(i.rehash_of is None for i in section.items)

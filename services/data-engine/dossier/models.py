@@ -100,6 +100,15 @@ class IndicatorsSection(IndicatorsResponse):
         return nan_to_none(value)
 
 
+class RehashOf(_Base):
+    """The stored headline (older than 14 days) this one retells: its row
+    id, when it was published, and the share of words the two titles have
+    in common (Jaccard, 0-1). Part 4.8b-de, spec 4.8b decision 10."""
+    id: int
+    published_at: datetime = Field(..., alias="publishedAt")
+    overlap_frac: float = Field(..., alias="overlapFrac")
+
+
 class NewsItem(_Base):
     # The news_items row id (Part 4.4): what ai-agent's classifier writes a
     # label back to. None when the store could not be read (no pool).
@@ -112,6 +121,8 @@ class NewsItem(_Base):
     # The stored classification object (Part 4.2's write-back), or None for
     # a headline nobody has labelled yet. Up to one dossier TTL stale.
     sentiment: Optional[dict] = None
+    # Part 4.8b-de: rehash layer 1, or None (also None without a pool).
+    rehash_of: Optional[RehashOf] = Field(None, alias="rehashOf")
 
 
 class NewsSection(Section):

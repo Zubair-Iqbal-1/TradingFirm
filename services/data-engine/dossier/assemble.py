@@ -321,6 +321,21 @@ async def build_news(ctx: DossierContext, ticker: str, profile: dict) -> NewsSec
     if ctx.pool is not None and kept:
         from db import get_news_labels
         labels = await get_news_labels(ctx.pool, ticker, [r["url"] for r in kept])
+    # Part 4.8b-de, rehash layer 1: a kept headline retelling one this ticker
+    # had more than 14 days ago. A raise is a database failure (503), like
+    # the label read above; no pool means no history and no mark.
+    rehash: dict[str, dict] = {}
+    if ctx.pool is not None and kept:
+        from db import get_news_titles
+        from dossier.rehash import REHASH_LOOKBACK_DAYS, REHASH_MIN_AGE_DAYS, best_match
+        now = ctx.now_utc()
+        stored = await get_news_titles(ctx.pool, ticker, now - timedelta(days=REHASH_MIN_AGE_DAYS),
+                                       now - timedelta(days=REHASH_LOOKBACK_DAYS))
+        for r in kept:
+            match = best_match(r["title"], ticker, stored)
+            if match is not None:
+                rehash[r["url"]] = match
+        del stored
     if truncated:
         logger.info(f"dossier news {ticker}: {len(rows)} headlines capped to {MAX_HEADLINES}")
     return NewsSection(
@@ -334,6 +349,7 @@ async def build_news(ctx: DossierContext, ticker: str, profile: dict) -> NewsSec
                 "summary": r["summary"],
                 "url": r["url"],
                 "sentiment": labels.get(r["url"], {}).get("sentiment"),
+                "rehashOf": rehash.get(r["url"]),
             }
             for r in kept
         ],
