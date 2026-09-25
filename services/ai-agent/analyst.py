@@ -61,11 +61,15 @@ def _unlabelled(items: list[dict]) -> list[dict]:
             and isinstance(i.get("headline"), str) and i["headline"].strip()]
 
 
-async def _classify_news(state, settings, ticker: str, user_id: str, items: list[dict], now) -> dict:
+async def _classify_news(state, settings, ticker: str, user_id: str, items: list[dict], now,
+                         known_from: Optional[list[dict]] = None) -> dict:
     """Label the ticker's unlabelled headlines through 4.2's classifier,
     in-process, and write every one with an id back. Labelled rows are never
-    sent. At most one LLM call (the dossier's 30-headline cap is the batch
-    size). Fails OPEN: on any refusal the verdict runs on raw headlines."""
+    sent. At most one LLM call (since 4.8b-ai `items` are the pre-filtered
+    15, so the batch is at most 15). Fails OPEN: on any refusal the verdict
+    runs on raw headlines. `known_from` (default `items`) is where the keys
+    offered for reuse come from: the route passes every dossier item, so a
+    key given to a headline the pre-filter cut is still offered."""
     summary = {"calls": 0, "classified": 0, "cached": 0, "writtenBack": 0,
                "writeBackErrors": 0, "ok": True}
     todo = _unlabelled(items)[:classifier.BATCH_MAX]
@@ -84,7 +88,7 @@ async def _classify_news(state, settings, ticker: str, user_id: str, items: list
             state.provider, redis, _memory(state, cache.STATE_CLASSIFIER_CALLS),
             getattr(state, "memory_cost", None) or cache.MemoryCost(), headlines,
             model=settings.llm_model_classifier, cap=settings.llm_classifier_daily_call_cap,
-            now=now, known_event_keys=events_mod.known_keys(items),
+            now=now, known_event_keys=events_mod.known_keys(known_from if known_from is not None else items),
         )
     except (LLMError, classifier.ClassifierError, prompts.PromptMissing, ValueError) as e:
         await classifier.record_failure(
@@ -167,11 +171,15 @@ async def run(state, settings, ticker: str, horizon: str, entry: Optional[float]
         raise AnalyzeError(502, str(e)) from None
     macro = await upstream.fetch_macro(http, settings.risk_shield_url, settings.risk_shield_timeout)
 
-    # 6–7. news -> labels -> events ───────────────────────────────
+    # 6–7. news -> pre-filter -> labels -> events ─────────────────
     sections = dossier["sections"]
+    today = date.fromisoformat(cache.et_day(now))
     news_items = [i for i in ((sections.get("news") or {}).get("items") or []) if isinstance(i, dict)]
-    news = await _classify_news(state, settings, ticker, user_id, news_items, now)
-    grouped = events_mod.group(news_items)
+    # 4.8b-ai: at most 15 headlines reach the classifier and the verdict
+    # (rehashes cut first, then questions and commentary); the rest are counted
+    kept_items, news_cut = events_mod.prefilter(news_items)
+    news = await _classify_news(state, settings, ticker, user_id, kept_items, now, known_from=news_items)
+    grouped = events_mod.group(kept_items, today=today)
 
     # 8. plan math ────────────────────────────────────────────────
     indicators = sections["indicators"]
@@ -193,7 +201,6 @@ async def run(state, settings, ticker: str, horizon: str, entry: Optional[float]
     has_plan = isinstance(plan, PlanMath)
 
     # 9. fingerprint and cache ────────────────────────────────────
-    today = date.fromisoformat(cache.et_day(now))
     next_date, in_days = analyze.next_earnings(dossier, today)
     system = prompts.load(prompts.VERDICT)
     suffix = cache.verdict_suffix(user_id, ticker, horizon, analyze.entry_key(given))
@@ -246,7 +253,7 @@ async def run(state, settings, ticker: str, horizon: str, entry: Optional[float]
     try:
         inputs = analyze.project(
             dossier, macro, grouped, plan, entry=resolved, entry_source=entry_source,
-            today=today, now=now, news_classified=news["ok"],
+            today=today, now=now, news_classified=news["ok"], news_prefiltered=news_cut,
         )
         # No `now` here: every ledger row is stamped when it is written, so a
         # request's rows sort in the order the calls happened (the classifier's

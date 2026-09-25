@@ -375,7 +375,8 @@ def test_labelled_headlines_are_never_resent(app):
     assert "- aapl-guidance-cut" in classify["user"], "known keys offered for reuse"
     assert out["classifier"] == {"calls": 1, "classified": 2, "cached": 0, "writtenBack": 2,
                                  "writeBackErrors": 0, "ok": True}
-    assert [w[0] for w in world.writes] == ["/news/502/sentiment", "/news/503/sentiment"]
+    # 4.8b-ai: the pre-filter orders newest first, so item 3 (09-21) leads item 2 (09-20)
+    assert [w[0] for w in world.writes] == ["/news/503/sentiment", "/news/502/sentiment"]
     assert world.writes[0][1]["eventKey"] == "aapl-story-0"
 
     rows = state.db_pool.ledger()
@@ -404,6 +405,31 @@ def test_same_event_key_groups_to_one_line(app):
     assert post(client).status_code == 200
     (event,) = json.loads(state.db_pool.row["prompt_inputs"])["events"]
     assert event["eventKey"] == "aapl-guidance-cut" and event["sources"] == 3
+
+
+def test_analyze_prefilters_before_the_classifier(app):
+    """Spec 4.8b decision 11: of 20 dossier headlines only 15 reach the
+    classifier and the verdict; rehashes go first, then questions and
+    commentary; the cut is counted; a key on a cut headline is still offered."""
+    world = World()
+    items = [news_item(i) for i in range(20)]
+    items[0]["headline"] = "Is AAPL a buy right now?"                       # a question: cut before fresh news
+    items[1]["source"] = "SeekingAlpha"                                      # commentary: cut before news
+    items[2]["rehashOf"] = {"id": 7, "publishedAt": "2026-08-01T00:00:00Z", "overlapFrac": 0.6}
+    items[3]["sentiment"] = {**LABEL, "eventKey": "aapl-old-story"}          # labelled, newest → kept
+    items[4]["sentiment"] = {**LABEL, "eventKey": "aapl-cut-story"}
+    items[4]["rehashOf"] = {"id": 8, "publishedAt": "2026-08-02T00:00:00Z", "overlapFrac": 0.7}
+    world.dossier = dossier(news=items)
+    client, _, state = app(world=world)
+    out = post(client).json()
+    classify = [c for c in state.provider.calls if c["label"] == "headline_classify"][0]
+    assert "Classify these 14 headlines" in classify["user"], "15 kept, one of them already labelled"
+    for cut in ("Headline 2", "Is AAPL a buy", "Headline 1\n"):
+        assert cut not in classify["user"], cut
+    assert "- aapl-cut-story" in classify["user"], "a key on a cut headline is still offered for reuse"
+    inputs = json.loads(state.db_pool.row["prompt_inputs"])
+    assert inputs["dataQuality"]["newsPrefiltered"] == 5 and len(inputs["events"]) == 15
+    assert out["classifier"]["classified"] == 14 and out["stored"] is True
 
 
 def test_item_without_id_skips_writeback(app):

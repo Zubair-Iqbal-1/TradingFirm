@@ -159,6 +159,7 @@ jobs:
               tests/test_journal_loop.py
               tests/test_journal_stats.py
               tests/test_reads.py
+              tests/test_sources.py
 
     steps:
       - uses: actions/checkout@v5
