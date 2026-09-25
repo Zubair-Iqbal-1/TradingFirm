@@ -1182,3 +1182,23 @@ On all four pre-expiry nights the 00:15 reading sat at ES −0.85…−0.95 / NQ
 **Decision:** `a46b239` deploys as is. Three questions are deferred to a journal review after 2–3 weeks of v3 rows: the swing-low stop floor ("a stop never sits above the newest swing low"; the 2026-09-24 rerun gave v3 valid 5 → 3 of 11, AAL's stop 12.81 → 12.13; the build was discarded uncommitted), the tie rule (`brokeAbove ≥ heldAbove` looks a support zone through, as coded), and the small from-above samples it reads (AAPL's three support zones carry 1, 2 and 3 from-above episodes). The journal judges all three together.
 
 **Supersedes:** N/A.
+
+---
+
+## 2026-09-25 — 4.8b splits into 4.8b-de and 4.8b-ai; data-engine measures, ai-agent flags
+
+**Decision:** spec `docs/specs/4.8b.md`, approved with the split. data-engine computes the four read blocks (`volumeRead`, `trendRead`, `momentumRead`, `rangeRead`) as measurements only; the thresholds, the six flags and `READS_VERSION` live in ai-agent (4.8b-ai), so a starting line is retuned without a data-engine rebuild. A breakout counts only a zone with `heldBelow ≥ brokeBelow`, the highest band when one bar clears several. Rehash layer 1 (`rehashOf`, Jaccard ≥ 0.5 and ≥ 4 shared words against the ticker's stored titles 14–180 days old, one `news_tokens` normalization) is data-engine's; `eventDate` is optional in the sentiment contract, null stored as null.
+
+**Why:** the bars and the stored headlines are data-engine's; judgement lines change more often than measurements. On the eleven the approved breakout rule leaves a breakout on 9 of 11 and `lowVolumeBreakout` on AAPL and AAL (the review's "6 of 11, AAL only" miscounted the 2 / 2 ties). Layer 1 matches 0 of 1,056 stored rows today (112 have a row > 14 days older; nearest pair Jaccard 0.35): it waits for the store to age.
+
+**Supersedes:** N/A.
+
+---
+
+## 2026-09-25 — The open session's bar is never stored; `sessionSoFar` shows it instead
+
+**Decision:** every bar write path (the scanner's persist, `POST /stock/{t}/refresh`, the dossier's stale refresh) drops today's daily row before the XNYS close and every hourly row whose hour (cut at the close) has not ended (`bar_session.drop_open_session_bars`; data-engine gains `exchange_calendars` 4.13.2, built lazily). The scanner still ranks on the partial bar in memory. The dropped daily row becomes `sessionSoFar` (Redis `tf:cache:session:{t}`, TTL to the close), attached to `/indicators` and the dossier at read time and never cached, null outside a session or when nothing downloaded this session. ai-agent's partial-bar withholding (4.8b-ai) stays as a second guard.
+
+**Why:** AAPL's verdicts of 2026-09-21 read `rvol` 0.45 on a stored partial day that closed at 0.80; every later reader took the row as a closed bar.
+
+**Supersedes:** N/A.

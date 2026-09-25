@@ -114,6 +114,9 @@ FastAPI app. Key pieces:
   ai-agent's classifier is the only caller. Part 4.4 adds an optional,
   validated `eventKey` slug to the contract, and the dossier's news items
   now carry their `news_items` `id` and the stored `sentiment` object.
+  Part 4.8b-de adds an optional `eventDate` (an ISO date or null, stored as
+  sent) and `rehashOf` on dossier news items: the stored title 14–180 days
+  old that a headline retells (`dossier/rehash.py`, Jaccard ≥ 0.5).
 - **`GET /news/market?hours=1..168&limit=1..100`** (3.6a, default 24 / 50) —
   stored `_MARKET` news, newest first, `[{publishedAt, source, title,
   summary, url}]`, Postgres only. `[]` when empty, 503 when the database is
@@ -244,7 +247,9 @@ FastAPI app. Key pieces:
   history, each zone with its `touches` / `held` / `broke` / `lastTouch`
   and the side split `heldBelow` / `brokeBelow` / `heldAbove` /
   `brokeAbove` from `zone_history`, plus `last_swing_low`, the newest
-  fractal low), `snapshot.py`
+  fractal low), `reads.py` (Part 4.8b-de: `volumeRead`, `trendRead`,
+  `momentumRead`, `rangeRead` — measurements only, ai-agent sets the flags),
+  `snapshot.py`
   (`swing_snapshot`: the plan §3 swing set + zones + `lastSwingLow` as one
   dict from a daily frame and optional benchmark closes; `scripts/
   snapshot_from_bars.py` runs it over exported bar rows with no database),
@@ -258,6 +263,13 @@ FastAPI app. Key pieces:
   its fields and shows `bars: 0` under `benchmarks`. Cached in Redis for
   15 min (`tf:cache:indicators:{ticker}`); `cached` is set on the way out,
   and `POST /stock/{ticker}/refresh` drops the key after writing bars.
+  `sessionSoFar` (Part 4.8b-de) is attached on the way out, never cached.
+- **The open session's bar is never stored** (Part 4.8b-de,
+  `bar_session.py`, XNYS from `exchange_calendars` 4.13.2): every write
+  path drops today's daily row before the close and every unfinished
+  hourly row. A dropped daily row is kept as `sessionSoFar` in Redis
+  (`tf:cache:session:{ticker}`, TTL to the close) and served while the
+  session trades, only if a refresh or scan downloaded it.
 - **`GET /dossier/{ticker}?horizon=swing`** — one document per ticker
   (`dossier/`): the indicator snapshot and zones, Finnhub news, events,
   recommendations and profile, EDGAR filings, and Part 2.3's earnings
