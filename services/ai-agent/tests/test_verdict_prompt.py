@@ -4,7 +4,7 @@ data block, the strict schema, the fingerprint and the merge. No I/O."""
 import hashlib
 import json
 import re
-from datetime import date
+from datetime import date, datetime, timezone
 from decimal import Decimal
 
 import pytest
@@ -16,6 +16,7 @@ from grading.plan_math import PlanRejected, compute_plan
 from providers.base import validate_request
 
 TODAY = date(2026, 9, 21)
+NOW = datetime(2026, 9, 21, 21, 30, tzinfo=timezone.utc)   # after the close: no partial bar
 ZONES = [{"low": 45.00, "high": 45.40}, {"low": 47.80, "high": 48.10},
          {"low": 53.90, "high": 54.30}, {"low": 56.90, "high": 57.30}]
 
@@ -33,6 +34,20 @@ def plan_near():
                         account=25000, risk_pct=1.0)
 
 
+READ_BLOCKS = {
+    "sessionSoFar": {"open": 50.2, "high": 50.9, "low": 49.8, "last": 50.6, "volumeSoFarShares": 1200000,
+                     "sessionElapsedFrac": 0.35, "changeVsPriorClosePct": 1.2, "scaledRvol": 1.1,
+                     "inProgress": True},
+    "volumeRead": {"upDays5Rvol": 1.1, "downDays5Rvol": 0.9,
+                   "breakout": {"date": "2026-09-17", "low": 48.1, "high": 48.4, "barRvol": 1.7},
+                   "pullbackDays": 0, "pullbackRvol": None},
+    "trendRead": {"stackUp": True, "ema20Rising10": True, "ema20Slope10Atr": 0.3,
+                  "swingLows": [45.2, 47.9], "higherLows": True},
+    "momentumRead": {"move30Atr": 2.1, "range30Atr": 6.2, "closesBelowEma20": 3, "lowerHighs": False},
+    "rangeRead": {"low": 41.0, "high": 52.0, "posFrac": 0.82, "ema20Crosses40": 3, "closedOutside": False},
+}
+
+
 def dossier(news=None, close=50.0012207):
     return {
         "ticker": "AAPL", "horizon": "swing", "asOf": "2026-09-18T00:00:00Z",
@@ -43,7 +58,10 @@ def dossier(news=None, close=50.0012207):
                            "pos52w": 0.62, "avgDollarVolume20": 1.5e9, "rsSpy5": 1.23,
                            "gaps20": [1, 2, 3], "computedAt": "x", "cached": True, "bars": 250,
                            "zones": {"support": ZONES[:2], "resistance": ZONES[2:]},
-                           "lastSwingLow": {"price": 47.9, "date": "2026-09-10"}},
+                           "lastSwingLow": {"price": 47.9, "date": "2026-09-10"},
+                           # 4.8b-de's five blocks, every key populated so the pin
+                           # test counts every path (spec 4.8b-ai decision 4)
+                           **READ_BLOCKS},
             "news": {"status": "truncated", "items": news or []},
             "events": {"status": "ok", "items": [
                 {"type": "earnings", "at": "2026-07-30T00:00:00Z", "meta": {}},
@@ -70,7 +88,7 @@ ANSWER = {"verdict": "wait", "confidence": 62, "reasoning": "Because.",
 
 def inputs(news_events=None, plan=None):
     return analyze.project(dossier(), MACRO, news_events or [], plan or plan_a(),
-                           entry=Decimal("50.00"), entry_source="last_close", today=TODAY,
+                           entry=Decimal("50.00"), entry_source="last_close", today=TODAY, now=NOW,
                            news_classified=True)
 
 
@@ -107,8 +125,8 @@ def test_next_earnings_ignores_the_past_and_other_events():
 def test_projection_is_trimmed_rounded_and_carries_no_account():
     doc = inputs()
     ind = doc["indicators"]
-    assert doc["projectionVersion"] == analyze.PROJECTION_VERSION == 4
-    assert doc["planMathVersion"] == 3
+    assert doc["projectionVersion"] == analyze.PROJECTION_VERSION == 5
+    assert doc["planMathVersion"] == 3 and doc["readsVersion"] == 1
     assert ind["lastSwingLow"] == {"price": 47.9, "date": "2026-09-10"}
     assert ind["close"] == 50.0012 and ind["atr14Usd"] == 1.2 and "atr14" not in ind
     assert ind["ext20Atr"] == 0.751 and ind["pos52wFrac"] == 0.62 and ind["rsSpy5Pct"] == 1.23
@@ -120,7 +138,7 @@ def test_projection_is_trimmed_rounded_and_carries_no_account():
     assert len(doc["earnings"]["reactions"]) == 4 and doc["recommendations"] == [{"buy": 20}] * 2
     assert doc["earnings"]["nextDate"] == "2026-10-29" and doc["earnings"]["inDays"] == 38
     assert doc["profile"] == {"name": "Apple Inc", "industry": "Tech", "marketCapUsdM": 3100000.0}
-    assert doc["dataQuality"] == {"news": "truncated", "filings": "unconfigured"}
+    assert doc["dataQuality"] == {"news": "truncated", "filings": "unconfigured", "newsPrefiltered": 0}
     assert doc["plan"] == {"entry": 50.0, "stop": 46.6, "stopBasis": doc["plan"]["stopBasis"],
                            "disasterLine": 45.4, "bestR": 2.03, "riskPerShare": 3.4,
                            "targets": [{"price": 56.9, "r": 2.03, "basis": "T1 56.90: resistance 56.90-57.30"}],
@@ -187,7 +205,7 @@ def test_prompt_names_extension_legend():
 
 def test_projection_marks_an_unclassified_news_section():
     doc = analyze.project(dossier(), MACRO, [], plan_a(), entry=Decimal("50"),
-                          entry_source="given", today=TODAY, news_classified=False)
+                          entry_source="given", today=TODAY, now=NOW, news_classified=False)
     assert doc["dataQuality"]["newsClassifier"] == "unavailable"
 
 
@@ -207,6 +225,7 @@ FULL_INDICATORS = {
               "resistance": [{"low": 371.841, "high": 372.9203, "price": 372.3806, "score": 20,
                               "tests": 2, "recent": False, "methods": ["swing_high"], "volumeNode": False}]},
     "benchmarks": {"spy": {"bars": 250, "ticker": "SPY"}, "sector": {"bars": 0, "ticker": None}},
+    **READ_BLOCKS,
 }
 
 
@@ -216,7 +235,7 @@ def full_inputs(**profile):
     d["sections"]["profile"] = {"status": "ok", "name": "Alphabet Inc", "industry": "Media",
                                 "marketCap": 4341283.1, **profile}
     return analyze.project(d, MACRO, [], plan_a(), entry=Decimal("354.97"),
-                           entry_source="last_close", today=TODAY, news_classified=True)
+                           entry_source="last_close", today=TODAY, now=NOW, news_classified=True)
 
 
 def _numeric_keys(value, key=None):
@@ -244,7 +263,8 @@ def test_every_projected_number_carries_its_unit():
         assert (key.endswith(analyze.UNIT_SUFFIXES) or key in analyze.PRICE_LEVEL_KEYS
                 or key in analyze.CONVENTIONAL_KEYS), f"{key}={value} carries no unit"
     # The static half: the allowlist's own targets, values or not.
-    containers = {"sector", "zones", "benchmarks", "lastSwingLow"}
+    containers = {"sector", "zones", "benchmarks", "lastSwingLow",
+                  "sessionSoFar", "volumeRead", "trendRead", "momentumRead", "rangeRead"}
     for target in analyze.INDICATOR_KEYS.values():
         assert (target in containers or target.endswith(analyze.UNIT_SUFFIXES)
                 or target in analyze.PRICE_LEVEL_KEYS or target in analyze.CONVENTIONAL_KEYS), target
@@ -275,7 +295,7 @@ def test_missing_indicator_projects_as_null(section, source, target):
     d = dossier()
     d["sections"][section].pop(source, None)
     doc = analyze.project(d, MACRO, [], plan_a(), entry=Decimal("50"), entry_source="given",
-                          today=TODAY, news_classified=True)
+                          today=TODAY, now=NOW, news_classified=True)
     assert target in doc[section] and doc[section][target] is None
     assert doc["plan"]["stop"] == 46.6, "the plan is plan math's, not the projection's"
 
@@ -284,7 +304,7 @@ def test_unknown_indicator_key_is_dropped():
     d = dossier()
     d["sections"]["indicators"]["newThing"] = 12.5
     doc = analyze.project(d, MACRO, [], plan_a(), entry=Decimal("50"), entry_source="given",
-                          today=TODAY, news_classified=True)
+                          today=TODAY, now=NOW, news_classified=True)
     assert "newThing" not in json.dumps(doc)
 
 
@@ -304,14 +324,45 @@ def test_projection_version_is_pinned():
     # 4: 4.8a-de added indicators.lastSwingLow.{price,date} and plan.extended /
     #    plan.entryForMaxRisk (58 → 62; a dict key is a path only through its
     #    children, so `indicators/lastSwingLow` itself is not one)
-    assert (analyze.PROJECTION_VERSION, len(paths), digest) == (4, 62, "6c1a999470313ea3")
+    # 5: 4.8b-ai added the five 4.8b-de blocks under indicators (8 + 5 + 4 + 5 + 9
+    #    paths, breakout's four through it), reads/* (5), readsVersion and
+    #    dataQuality/newsPrefiltered (62 → 100)
+    assert (analyze.PROJECTION_VERSION, len(paths), digest) == (5, 100, "4029583e5428241d")
     assert "/indicators/lastSwingLow/price" in paths and "/indicators/lastSwingLow" not in paths
+    assert "/indicators/volumeRead/breakout/barRvol" in paths and "/indicators/sessionSoFar/last" in paths
+    assert "/reads/flags" in paths and "/readsVersion" in paths and "/dataQuality/newsPrefiltered" in paths
 
 
 def test_projection_version_bump_changes_the_fingerprint(monkeypatch):
     before = analyze.fingerprint(**BASE)
     monkeypatch.setattr(analyze, "PROJECTION_VERSION", analyze.PROJECTION_VERSION + 1)
     assert analyze.fingerprint(**BASE) != before
+
+
+def test_reads_version_in_fingerprint(monkeypatch):
+    """A flag line moved under a READS_VERSION bump retires every cached
+    verdict (spec 4.8b-ai decisions 1, 6)."""
+    import reads
+    before = analyze.fingerprint(**BASE)
+    monkeypatch.setattr(reads, "READS_VERSION", reads.READS_VERSION + 1)
+    assert analyze.fingerprint(**BASE) != before
+
+
+def test_reads_in_prompt_inputs():
+    """`reads` is built from the raw section and stored beside its version;
+    the flags are never a rule: the plan is the same with or without them."""
+    doc = inputs()
+    assert doc["readsVersion"] == 1
+    assert doc["reads"] == {"uptrend": False, "flags": [], "withheld": [], "lastBarPartial": False,
+                            "trendReasons": doc["reads"]["trendReasons"]}
+    assert doc["reads"]["trendReasons"][2] == "RS 20d vs SPY unknown ✗", "rsSpy20 is absent in the fixture"
+    assert doc["indicators"]["sessionSoFar"]["last"] == 50.6 and doc["indicators"]["volumeRead"]["breakout"]["barRvol"] == 1.7
+    d = dossier()
+    d["sections"]["indicators"]["momentumRead"] = {"move30Atr": 0.1, "range30Atr": 2.0, "closesBelowEma20": 3,
+                                                  "lowerHighs": False}
+    flagged = analyze.project(d, MACRO, [], plan_a(), entry=Decimal("50.00"), entry_source="last_close",
+                              today=TODAY, now=NOW, news_classified=True)
+    assert flagged["reads"]["flags"] == ["dead"] and flagged["plan"] == doc["plan"]
 
 
 # data-engine's IndicatorsResponse aliases, in its order. The other side is
@@ -322,6 +373,8 @@ DATA_ENGINE_INDICATOR_FIELDS = [
     "ticker", "asOf", "bars", "close", "sector", "ema20", "ema50", "ema200", "atr14", "rvol",
     "rsi14", "macd", "macdSignal", "macdHist", "pos52w", "ext20", "ext50", "rsSpy5", "rsSpy20",
     "rsSector5", "rsSector20", "avgDollarVolume20", "gapPct", "gaps20", "zones", "lastSwingLow",
+    # 4.8b-de: today so far, and the four read blocks (4.8b-ai projects all five)
+    "sessionSoFar", "volumeRead", "trendRead", "momentumRead", "rangeRead",
     "benchmarks", "computedAt", "cached",
 ]
 DROPPED_INDICATOR_FIELDS = {"ticker", "asOf", "bars", "gaps20", "computedAt", "cached"}
@@ -460,7 +513,7 @@ def test_over_long_strings_are_trimmed_not_rejected(caplog):
 BASE = dict(high_event_keys=["aapl-guidance-cut"], next_earnings_date="2026-10-29",
             regime="CAUTIOUS", brief_id=None, entry_key_="auto", as_of="2026-09-18T00:00:00Z",
             bucket=0, account=Decimal("25000"), risk_pct=Decimal("1.0"), prompt_sha_="abc",
-            model="anthropic/claude-sonnet-5")
+            model="anthropic/claude-sonnet-5", session_bucket=None)
 
 
 @pytest.mark.parametrize("change", [
@@ -469,6 +522,7 @@ BASE = dict(high_event_keys=["aapl-guidance-cut"], next_earnings_date="2026-10-2
     {"brief_id": "7d0c0000-0000-4000-8000-000000000001"}, {"as_of": "2026-09-21T00:00:00Z"},
     {"bucket": 1}, {"bucket": -1}, {"account": Decimal("30000")}, {"risk_pct": Decimal("2.0")},
     {"prompt_sha_": "def"}, {"model": "z-ai/glm-5.3"}, {"entry_key_": "5000"},
+    {"session_bucket": 0}, {"session_bucket": 1},
 ])
 def test_fingerprint_change_invalidates(change):
     assert analyze.fingerprint(**{**BASE, **change}) != analyze.fingerprint(**BASE)

@@ -218,6 +218,13 @@ def test_analyze_returns_stores_and_ledgers_a_verdict(app):
     assert json.loads(row["dossier"])["ticker"] == "AAPL", "the full dossier snapshot"
     assert json.loads(row["prompt_inputs"])["plan"]["stop"] == 46.6
     assert json.loads(row["prompt_inputs"])["planMathVersion"] == 3 == row["plan_math_version"]
+    inputs = json.loads(row["prompt_inputs"])
+    # 4.8b-ai: the reads and their version ride in prompt_inputs; this fixture
+    # has none of the four blocks, so no flag and the uptrend fails with reasons
+    assert (inputs["readsVersion"], inputs["projectionVersion"]) == (1, 5)
+    assert inputs["reads"]["flags"] == [] and inputs["reads"]["uptrend"] is False
+    assert len(inputs["reads"]["trendReasons"]) == 4 and inputs["indicators"]["sessionSoFar"] is None
+    assert inputs["dataQuality"]["newsPrefiltered"] == 0
     assert json.loads(row["plan_proposed"])["entryForMaxRisk"] == 49.0
     assert json.loads(row["plan_proposed"])["overhead"][0]["price"] == 53.9
     assert row["macro_brief_id"] is None and row["regime"] == "CAUTIOUS"

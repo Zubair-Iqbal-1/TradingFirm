@@ -199,6 +199,11 @@ async def run(state, settings, ticker: str, horizon: str, entry: Optional[float]
     suffix = cache.verdict_suffix(user_id, ticker, horizon, analyze.entry_key(given))
     held = await cache.get_cached_verdict(redis, suffix)
 
+    # 4.8b-ai: today's price while a session view exists, bucketed like the
+    # closed bar's; None outside market hours or without a stash
+    session = indicators.get("sessionSoFar")
+    session = session if isinstance(session, dict) else None
+
     def fingerprint_from(reference_entry) -> str:
         return analyze.fingerprint(
             high_event_keys=events_mod.high_relevance_keys(grouped), next_earnings_date=next_date,
@@ -207,6 +212,8 @@ async def run(state, settings, ticker: str, horizon: str, entry: Optional[float]
             bucket=analyze.price_bucket(indicators["close"], reference_entry, indicators.get("atr14")),
             account=account["accountSize"], risk_pct=account["riskPct"],
             prompt_sha_=analyze.prompt_sha(system), model=settings.llm_model,
+            session_bucket=(analyze.price_bucket(session.get("last"), reference_entry, indicators.get("atr14"))
+                            if session is not None else None),
         )
 
     common = {
@@ -239,7 +246,7 @@ async def run(state, settings, ticker: str, horizon: str, entry: Optional[float]
     try:
         inputs = analyze.project(
             dossier, macro, grouped, plan, entry=resolved, entry_source=entry_source,
-            today=today, news_classified=news["ok"],
+            today=today, now=now, news_classified=news["ok"],
         )
         # No `now` here: every ledger row is stamped when it is written, so a
         # request's rows sort in the order the calls happened (the classifier's

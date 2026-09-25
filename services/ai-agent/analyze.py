@@ -27,6 +27,7 @@ from typing import Any, Optional, Union
 from pydantic import ValidationError
 
 import events as events_mod
+import reads as reads_mod
 from grading.plan_math import PLAN_MATH_VERSION, PlanMath, PlanRejected
 from models import verdict as verdict_model
 from models.verdict import Plan, Verdict
@@ -48,7 +49,7 @@ MAX_RECOMMENDATIONS = 2
 # so a cached verdict built on an older document is never served, and it is
 # stored inside prompt_inputs as `projectionVersion` (absent = 1), so a
 # reader of ai.verdicts knows which key set a row follows.
-PROJECTION_VERSION = 4
+PROJECTION_VERSION = 5
 
 # The indicator keys the model reads, data-engine's name -> the projected
 # name. An allowlist, never a pass-through: a key data-engine adds later is
@@ -73,17 +74,29 @@ INDICATOR_KEYS = {
     # 4.8a-de: the newest fractal swing low, {price, date}; plan math's
     # far-branch stop candidate, so the model reads what the basis names
     "lastSwingLow": "lastSwingLow",
+    # 4.8b-ai: today in progress (never a candle; read by no rule here) and
+    # the four read blocks data-engine measures (4.8b-de), whose keys already
+    # carry their units; reads.py turns them into `reads`
+    "sessionSoFar": "sessionSoFar",
+    "volumeRead": "volumeRead", "trendRead": "trendRead",
+    "momentumRead": "momentumRead", "rangeRead": "rangeRead",
 }
-UNIT_SUFFIXES = ("Atr", "Pct", "Frac", "Usd", "UsdM")
+# 4.8b-ai: `Rvol` a multiple of the 20-bar average volume, `Days` trading
+# days, `Shares` a share count
+UNIT_SUFFIXES = ("Atr", "Pct", "Frac", "Usd", "UsdM", "Rvol", "Days", "Shares")
 # Numbers the model reads without a suffix: prices in dollars, and the
 # conventional keys the legend in prompts/verdict.md names one by one.
-PRICE_LEVEL_KEYS = frozenset({"close", "ema20", "ema50", "ema200", "low", "high", "price"})
+# 4.8b-ai: `open` / `last` (sessionSoFar) and `swingLows` (a list of prices).
+PRICE_LEVEL_KEYS = frozenset({"close", "ema20", "ema50", "ema200", "low", "high", "price",
+                              "open", "last", "swingLows"})
 CONVENTIONAL_KEYS = frozenset({"rvol", "rsi14", "macd", "macdSignal", "macdHist",
                                "score", "tests", "bars",
                                # 4.8a-de: a zone's history, counts of episodes,
                                # and the side split (2026-09-24)
                                "touches", "held", "broke",
-                               "heldBelow", "brokeBelow", "heldAbove", "brokeAbove"})
+                               "heldBelow", "brokeBelow", "heldAbove", "brokeAbove",
+                               # 4.8b-ai: counts of bars
+                               "closesBelowEma20", "ema20Crosses40"})
 
 
 class VerdictRejected(Exception):
@@ -217,10 +230,13 @@ def project(
     entry: Decimal,
     entry_source: str,
     today: date,
+    now: datetime,
     news_classified: bool,
+    news_prefiltered: int = 0,
 ) -> dict:
     """The exact document the model reads, and what ai.verdicts.prompt_inputs
-    stores (D5). Built from the dossier by selection, never by free text."""
+    stores (D5). Built from the dossier by selection, never by free text.
+    `now` (aware) is for the partial-bar guard in reads.build only."""
     sections = dossier.get("sections", {})
     source = sections.get("indicators") or {}
     indicators = {target: source.get(name) for name, target in INDICATOR_KEYS.items()}
@@ -241,10 +257,13 @@ def project(
     }
     if not news_classified:
         quality["newsClassifier"] = "unavailable"
+    # 4.8b-ai: always present, 0 when nothing was cut (spec 4.8b-ai decision 4)
+    quality["newsPrefiltered"] = int(news_prefiltered)
 
     return _round({
         "projectionVersion": PROJECTION_VERSION,
         "planMathVersion": PLAN_MATH_VERSION,
+        "readsVersion": reads_mod.READS_VERSION,
         "ticker": dossier.get("ticker"),
         "horizon": dossier.get("horizon"),
         "asOf": dossier.get("asOf"),
@@ -252,6 +271,9 @@ def project(
         "entry": float(entry),
         "entrySource": entry_source,
         "indicators": indicators,
+        # 4.8b-ai: the uptrend call and the flags, from data-engine's raw
+        # section (its own key names), never a rule
+        "reads": reads_mod.build(source, today=today, now=now),
         "events": events,
         "earnings": {
             "nextDate": next_date,
@@ -364,14 +386,22 @@ def fingerprint(
     risk_pct: Any,
     prompt_sha_: str,
     model: str,
+    session_bucket: Optional[int] = None,
 ) -> str:
     """The invalidation rule (spec 4.4 decision 9): a cached verdict is
     served only while every one of these is unchanged. `projection` (spec
     verdict-units decision 3) retires every cache entry when the document's
-    key set changes, which prompt_sha alone cannot see."""
+    key set changes, which prompt_sha alone cannot see. `reads` (4.8b-ai)
+    does the same for a flag-line change. `sessionBucket` is today's
+    price in whole ATRs from the verdict's entry while a session view exists
+    (price_bucket on sessionSoFar.last), None outside one: since 4.8b-de the
+    closed bar's bucket cannot see an intraday move, this can (spec 4.8b-ai
+    decision 5)."""
     basis = {
         "projection": PROJECTION_VERSION,
         "planMath": PLAN_MATH_VERSION,
+        "reads": reads_mod.READS_VERSION,
+        "sessionBucket": session_bucket,
         "events": sorted(high_event_keys),
         "earnings": next_earnings_date,
         "regime": regime,

@@ -204,6 +204,56 @@ def test_cached_verdict_read_failure_is_a_miss(app):
     assert out["cached"] is False and state.provider.count("verdict") == 2
 
 
+SESSION = {"open": 50.1, "high": 50.4, "low": 49.9, "last": 50.3, "volumeSoFarShares": 900000,
+           "sessionElapsedFrac": 0.2, "changeVsPriorClosePct": 0.6, "scaledRvol": 1.3, "inProgress": True}
+
+
+def test_session_so_far_in_fingerprint(app):
+    """Spec 4.8b-ai decision 5 (approval change 4). The reference entry is
+    the dossier's last daily close in cents when no entry is passed
+    (analyze.resolve_entry, ENTRY_LAST_CLOSE): here 50.00 with ATR 1.20, so
+    the bucket edges sit at 51.20 / 48.80. Four cases: absent → present
+    retires; a move of ≥ 1 ATR retires; two `last` values inside the same
+    whole-ATR bucket are served, new volume and elapsed fraction included; a
+    0.02 move that crosses a bucket edge retires."""
+    client, world, state = app()
+    ind = world.dossier["sections"]["indicators"]
+    assert "sessionSoFar" not in ind and (ind["close"], ind["atr14"]) == (50.0, 1.2)
+    assert post(client).json()["cached"] is False                      # verdict 1, no session view
+    assert post(client).json()["cached"] is True
+
+    ind["sessionSoFar"] = dict(SESSION)                                 # 1. absent → present
+    assert post(client).json()["cached"] is False and state.provider.count("verdict") == 2
+    assert json.loads(state.db_pool.row["prompt_inputs"])["indicators"]["sessionSoFar"]["last"] == 50.3
+
+    ind["sessionSoFar"] = {**SESSION, "last": 50.9, "volumeSoFarShares": 4200000,
+                           "sessionElapsedFrac": 0.7}                   # 3. same bucket (0.75 ATR)
+    out = post(client).json()
+    assert out["cached"] is True and state.provider.count("verdict") == 2, "served: same whole-ATR bucket"
+
+    ind["sessionSoFar"] = {**SESSION, "last": 52.0}                     # 2. 1.67 ATR away
+    assert post(client).json()["cached"] is False and state.provider.count("verdict") == 3
+
+    ind["sessionSoFar"] = {**SESSION, "last": 51.19}                    # back to bucket 0 (0.99 ATR)
+    assert post(client).json()["cached"] is False and state.provider.count("verdict") == 4
+    assert post(client).json()["cached"] is True
+    ind["sessionSoFar"] = {**SESSION, "last": 51.21}                    # 4. +0.02, across the 1-ATR edge
+    assert post(client).json()["cached"] is False and state.provider.count("verdict") == 5
+
+    ind.pop("sessionSoFar")                                             # the close: present → absent
+    assert post(client).json()["cached"] is False and state.provider.count("verdict") == 6
+
+
+def test_reads_version_bump_invalidates(app, monkeypatch):
+    import reads
+    client, _, state = app()
+    post(client)
+    assert post(client).json()["cached"] is True
+    monkeypatch.setattr(reads, "READS_VERSION", reads.READS_VERSION + 1)
+    out = post(client).json()
+    assert out["cached"] is False and state.provider.count("verdict") == 2
+
+
 def test_plan_math_version_in_fingerprint(app, monkeypatch):
     """A verdict cached under plan math v1 is never served after the v2
     deploy: the version is in the fingerprint (4.8a decision 4)."""
