@@ -17,13 +17,23 @@ def test_headline_classify_prompt_ships_and_states_the_contract():
     assert text.strip()
     # Every enum the schema accepts has to be described, or the model is
     # being asked to guess what "insider" means.
-    for word in ("relevance", "sentiment", "category", "oneLine", "eventKey"):
+    for word in ("relevance", "sentiment", "category", "oneLine", "eventKey", "eventDate"):
         assert word in text
+    assert "`YYYY-MM-DD`" in text and "only when the headline or summary states it" in text
     for value in ("high", "medium", "low"):
         assert f"`{value}`" in text
     for value in ("guidance", "analyst", "legal", "product", "macro", "insider", "other"):
         assert f"`{value}`" in text
     assert "-1" in text and "1" in text
+
+
+def test_prompt_caps_one_line_at_120():
+    """4.8b-ai: the ask is 120 characters; the contract's ONE_LINE_MAX 300
+    is unchanged on both sides, so an over-long line is still trimmed there."""
+    import classifier
+    text = prompts.load(prompts.HEADLINE_CLASSIFY)
+    assert "at most 120 characters" in text and "200 characters" not in text
+    assert classifier.ONE_LINE_MAX == 300
 
 
 def test_prompt_is_not_advice():

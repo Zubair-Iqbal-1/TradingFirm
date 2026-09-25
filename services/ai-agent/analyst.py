@@ -89,6 +89,7 @@ async def _classify_news(state, settings, ticker: str, user_id: str, items: list
             getattr(state, "memory_cost", None) or cache.MemoryCost(), headlines,
             model=settings.llm_model_classifier, cap=settings.llm_classifier_daily_call_cap,
             now=now, known_event_keys=events_mod.known_keys(known_from if known_from is not None else items),
+            cache_system=settings.llm_classifier_cache,
         )
     except (LLMError, classifier.ClassifierError, prompts.PromptMissing, ValueError) as e:
         await classifier.record_failure(

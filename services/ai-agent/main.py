@@ -389,6 +389,7 @@ async def classify_headlines(body: ClassifyRequest):
                 model=settings.llm_model_classifier,
                 cap=settings.llm_classifier_daily_call_cap,
                 known_event_keys=body.knownEventKeys,
+                cache_system=settings.llm_classifier_cache,
             )
         except Exception as e:
             # Part 4.4: a request that reached the wire gets its ledger row
@@ -444,6 +445,7 @@ async def classify_headlines(body: ClassifyRequest):
                 "category": c["category"],
                 "oneLine": c["oneLine"],
                 "eventKey": c["eventKey"],
+                "eventDate": c.get("eventDate"),        # 4.8b-ai; absent on a pre-part label
                 "cached": c["cached"],
             }
             for item, c in zip(body.items, results)

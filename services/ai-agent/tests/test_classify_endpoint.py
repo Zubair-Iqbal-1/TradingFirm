@@ -111,7 +111,7 @@ def test_classify_returns_every_item_in_request_order(client):
         f"{base}/news/100/sentiment", f"{base}/news/101/sentiment",
     ]
     assert set(seen[0]["json"]) == {"relevance", "sentiment", "category",
-                                    "oneLine", "eventKey", "model", "classifiedAt"}
+                                    "oneLine", "eventKey", "eventDate", "model", "classifiedAt"}
 
 
 def test_writtenback_plus_errors_equals_items_with_an_id(client):
@@ -305,9 +305,9 @@ def test_bad_llm_answer_returns_502_and_caches_nothing(client, error):
 def test_item_contract_violation_rejects_whole_batch(client):
     bad = answer(2, items=[
         {"index": 0, "relevance": "high", "sentiment": 0.1,
-         "category": "guidance", "oneLine": "fine", "eventKey": "fine-story"},
+         "category": "guidance", "oneLine": "fine", "eventKey": "fine-story", "eventDate": None},
         {"index": 1, "relevance": "critical", "sentiment": 0.1,
-         "category": "guidance", "oneLine": "bad enum", "eventKey": "bad-story"},
+         "category": "guidance", "oneLine": "bad enum", "eventKey": "bad-story", "eventDate": None},
     ])
     handler, seen = recorder()
     r = FakeRedis()
@@ -418,6 +418,38 @@ def test_response_items_carry_event_key(client):
     assert [i["eventKey"] for i in out["items"]] == ["story-0", "story-1"]
 
 
+def test_classify_response_carries_event_date(client):
+    """4.8b-ai: the item's eventDate (null when the headline stated none);
+    a pre-part cached label has no key and reads as null."""
+    from tests.test_classifier import GOOD
+    handler, seen = recorder()
+    r = FakeRedis()
+    old = {"relevance": "low", "sentiment": 0.0, "category": "other", "oneLine": "old",
+           "eventKey": "old-story", "model": MODEL, "classifiedAt": "2026-09-01T00:00:00+00:00"}
+    r.store[cache.classify_key(cache.headline_digest("Headline 1", "https://x/1"))] = json.dumps(old)
+    fresh = answer(1, items=[{**GOOD, "eventKey": "new-story", "eventDate": "2026-09-16"}])
+    c = client(provider=StubProvider(fresh), redis=r, handler=handler)
+    out = c.post("/classify/headlines", json=body(2)).json()
+    assert [(i["eventKey"], i["eventDate"], i["cached"]) for i in out["items"]] == [
+        ("new-story", "2026-09-16", False), ("old-story", None, True)]
+    # write-back: the fresh label sends the key, the old one still does not
+    payloads = {s["url"].rsplit("/", 2)[1]: s["json"] for s in seen}
+    assert payloads["100"]["eventDate"] == "2026-09-16" and "eventDate" not in payloads["101"]
+
+
+def test_classify_route_passes_cache_flag(client, monkeypatch):
+    handler, _ = recorder()
+    p = StubProvider(answer(1))
+    c = client(provider=p, redis=FakeRedis(), handler=handler)
+    assert c.post("/classify/headlines", json=body(1)).status_code == 200
+    assert p.calls[0]["cache_system"] is False
+    monkeypatch.setattr(main.settings, "llm_classifier_cache", True)
+    p2 = StubProvider(answer(1))
+    c = client(provider=p2, redis=FakeRedis(), handler=handler)
+    assert c.post("/classify/headlines", json=body(1, with_ids=False)).status_code == 200
+    assert p2.calls[0]["cache_system"] is True
+
+
 def test_known_event_keys_reach_the_classifier(client):
     handler, _ = recorder()
     p = StubProvider(answer(1))
@@ -498,7 +530,7 @@ def test_pre_wire_refusal_writes_no_ledger_row(client, error):
 def test_rejected_batch_is_ledgered_with_its_usage_and_its_cost_counted(client):
     """The answer was paid for even though it is thrown away."""
     bad = answer(1, items=[{"index": 0, "relevance": "critical", "sentiment": 0,
-                            "category": "other", "oneLine": "x", "eventKey": "a-b"}])
+                            "category": "other", "oneLine": "x", "eventKey": "a-b", "eventDate": None}])
     pool, r = FakePool(), FakeRedis()
     c = client(provider=StubProvider(bad), redis=r, pool=pool)
     assert c.post("/classify/headlines", json=body(1)).status_code == 502

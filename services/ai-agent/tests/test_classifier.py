@@ -34,7 +34,7 @@ def answer(n, cost=0.0057, model=MODEL, items=None):
     data = {"items": items if items is not None else [
         {"index": i, "relevance": "high", "sentiment": -0.4,
          "category": "guidance", "oneLine": f"Line {i}.",
-         "eventKey": f"story-{i}"} for i in range(n)
+         "eventKey": f"story-{i}", "eventDate": None} for i in range(n)
     ]}
     usage = {"input": 812, "output": 410}
     if cost is not None:
@@ -89,8 +89,12 @@ def test_item_limits_pinned_to_spec():
         "Change both or neither."
     )
     assert classifier.ITEM_LIMITS["eventKey"] == (80, classifier.EVENT_KEY_PATTERN)
+    # 4.8b-ai: data-engine keeps SENTIMENT_EVENT_DATE_RE (optional there, null
+    # stored as null; test_sentiment_contract_pinned_to_spec). Change both or neither.
+    assert classifier.ITEM_LIMITS["eventDate"] == classifier.EVENT_DATE_PATTERN == r"^\d{4}-\d{2}-\d{2}$"
     assert classifier.KNOWN_KEYS_MAX == 40
     assert classifier.BATCH_MAX == 30
+    assert classifier.MAX_TOKENS == 2500
 
 
 def test_schema_is_acceptable_to_the_provider_and_matches_the_contract():
@@ -99,7 +103,8 @@ def test_schema_is_acceptable_to_the_provider_and_matches_the_contract():
 
     item = classifier.SCHEMA["properties"]["items"]["items"]
     assert item["required"] == ["index", "relevance", "sentiment", "category",
-                                "oneLine", "eventKey"]
+                                "oneLine", "eventKey", "eventDate"]
+    assert item["properties"]["eventDate"] == {"type": ["string", "null"]}
     assert set(item["required"]) == set(item["properties"])      # strict mode
     assert item["properties"]["relevance"]["enum"] == list(classifier.RELEVANCE)
     assert item["properties"]["category"]["enum"] == list(classifier.CATEGORIES)
@@ -336,13 +341,14 @@ async def test_items_not_a_list_is_rejected():
 def test_validate_answer_reorders_by_index_and_trims():
     out = classifier.validate_answer({"items": [
         {"index": 1, "relevance": "low", "sentiment": 0, "category": "other",
-         "oneLine": "  second  ", "eventKey": "b-two"},
+         "oneLine": "  second  ", "eventKey": "b-two", "eventDate": None},
         {"index": 0, "relevance": "high", "sentiment": -1, "category": "macro",
-         "oneLine": "x" * 400, "eventKey": "a-one"},
+         "oneLine": "x" * 400, "eventKey": "a-one", "eventDate": "2026-09-16"},
     ]}, 2)
 
     assert [o["oneLine"] for o in out] == ["x" * 300, "second"]
     assert out[0]["sentiment"] == -1.0 and isinstance(out[0]["sentiment"], float)
+    assert [o["eventDate"] for o in out] == ["2026-09-16", None]
 
 
 def test_validate_answer_accepts_both_bounds_and_every_enum():
@@ -350,7 +356,8 @@ def test_validate_answer_accepts_both_bounds_and_every_enum():
     for relevance in classifier.RELEVANCE:
         for category in classifier.CATEGORIES:
             items.append({"index": expected, "relevance": relevance, "sentiment": 1.0,
-                          "category": category, "oneLine": "ok", "eventKey": "some-story"})
+                          "category": category, "oneLine": "ok", "eventKey": "some-story",
+                          "eventDate": None})
             expected += 1
     out = classifier.validate_answer({"items": items}, expected)
     assert len(out) == expected
@@ -358,7 +365,7 @@ def test_validate_answer_accepts_both_bounds_and_every_enum():
     for bound in (-1.0, 0.0, 1.0):
         one = classifier.validate_answer({"items": [
             {"index": 0, "relevance": "low", "sentiment": bound,
-             "category": "other", "oneLine": "ok", "eventKey": "some-story"}]}, 1)
+             "category": "other", "oneLine": "ok", "eventKey": "some-story", "eventDate": None}]}, 1)
         assert one[0]["sentiment"] == bound
 
 
@@ -393,7 +400,7 @@ async def test_stored_classification_carries_model_and_timestamp():
     stored = await cache.get_classifications(r, [digest])
     assert stored[digest]["model"] == MODEL
     assert set(stored[digest]) == {"relevance", "sentiment", "category", "oneLine",
-                                   "eventKey", "model", "classifiedAt"}
+                                   "eventKey", "eventDate", "model", "classifiedAt"}
 
 
 @pytest.mark.asyncio
@@ -430,7 +437,7 @@ def test_user_prompt_bounds_a_huge_title():
 # ── Part 4.4: event keys ─────────────────────────────────────────
 
 GOOD = {"index": 0, "relevance": "high", "sentiment": 0.1,
-        "category": "guidance", "oneLine": "a"}
+        "category": "guidance", "oneLine": "a", "eventDate": None}
 
 
 @pytest.mark.asyncio
@@ -445,6 +452,84 @@ async def test_bad_event_key_rejects_batch(key):
     with pytest.raises(classifier.BatchRejected):
         await run(StubProvider(answer(1, items=[item])), heads(1), redis=r)
     assert not any(k.startswith("tf:ai:classify:") for k in r.store)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", ["2026-02-30", "09/16/2026", 20260916, "", "2026-9-16",
+                                   "2026-09-16T00:00:00Z", "yesterday", "MISSING"])
+async def test_event_date_validated(value):
+    """4.8b-ai: a malformed, impossible or missing eventDate rejects the whole
+    batch; nothing is cached (the 4.2 batch rule)."""
+    r = FakeRedis()
+    item = {k: v for k, v in GOOD.items() if k != "eventDate"} if value == "MISSING" else {**GOOD, "eventDate": value}
+    item["eventKey"] = "some-story"
+    with pytest.raises(classifier.BatchRejected, match="eventDate"):
+        await run(StubProvider(answer(1, items=[item])), heads(1), redis=r)
+    assert not any(k.startswith("tf:ai:classify:") for k in r.store)
+    assert classifier.valid_event_date(None) and classifier.valid_event_date("2026-09-16")
+    assert not classifier.valid_event_date(value if value != "MISSING" else object())
+
+
+@pytest.mark.asyncio
+async def test_fresh_label_carries_event_date_null_or_date():
+    """A fresh label always carries the key (null or a date), so the
+    write-back sends it and data-engine stores null as null."""
+    r = FakeRedis()
+    items = [{**GOOD, "index": 0, "eventKey": "a-b", "eventDate": "2026-09-16"},
+             {**GOOD, "index": 1, "eventKey": "c-d", "eventDate": None}]
+    out, _ = await run(StubProvider(answer(2, items=items)), heads(2), redis=r)
+    assert [o["eventDate"] for o in out] == ["2026-09-16", None]
+    assert all("eventDate" in o for o in out)
+    digests = [cache.headline_digest(h["title"], h["url"]) for h in heads(2)]
+    stored = await cache.get_classifications(r, digests)
+    assert [stored[d]["eventDate"] for d in digests] == ["2026-09-16", None]
+
+
+@pytest.mark.asyncio
+async def test_cached_label_without_event_date_is_served():
+    """A digest entry written before 4.8b-ai has no eventDate: it is served
+    as it is, read as null, never re-classified (spec 4.8b X15), and the
+    write-back payload — the label minus `cached` — still lacks the key, so
+    data-engine keeps the field absent rather than storing a null."""
+    r = FakeRedis()
+    digest = cache.headline_digest("Headline 0", "https://x/0")
+    old = {"relevance": "low", "sentiment": 0.0, "category": "other", "oneLine": "old",
+           "eventKey": "old-story", "model": MODEL, "classifiedAt": NOON.isoformat()}
+    await cache.store_classifications(r, {digest: old})
+
+    p = StubProvider(answer(1))
+    out, result = await run(p, heads(1), redis=r)
+
+    assert p.calls == [] and result is None
+    assert out[0]["cached"] is True and out[0].get("eventDate") is None and "eventDate" not in out[0]
+    assert {k: v for k, v in out[0].items() if k != "cached"} == old
+
+
+@pytest.mark.asyncio
+async def test_classifier_passes_cache_flag():
+    """4.8b-ai: LLM_CLASSIFIER_CACHE rides to the provider as cache_system,
+    exactly as the verdict's flag; the default is off."""
+    p = StubProvider(answer(1), answer(1))
+    await run(p, heads(1))
+    assert p.calls[0]["cache_system"] is False and p.calls[0]["max_tokens"] == 2500
+    await classifier.classify(p, None, cache.MemoryCap(), cache.MemoryCost(), heads(1),
+                              model=MODEL, cap=40, now=NOON, cache_system=True)
+    assert p.calls[1]["cache_system"] is True
+
+
+@pytest.mark.asyncio
+async def test_classifier_system_prompt_has_no_request_data():
+    """The cached block must be byte-stable: the system prompt is the file,
+    and every request-specific string is in the user message."""
+    import prompts
+    p = StubProvider(answer(2), answer(1))
+    await run(p, heads(2))
+    await classifier.classify(p, None, cache.MemoryCap(), cache.MemoryCost(),
+                              [{**heads(1)[0], "title": "Unique headline zq7", "ticker": "ZQ7"}],
+                              model=MODEL, cap=40, now=NOON, known_event_keys=["zq7-story"])
+    assert p.calls[0]["system"] == p.calls[1]["system"] == prompts.load(prompts.HEADLINE_CLASSIFY)
+    assert "Unique headline zq7" not in p.calls[1]["system"] and "zq7-story" not in p.calls[1]["system"]
+    assert "Unique headline zq7" in p.calls[1]["user"] and "zq7-story" in p.calls[1]["user"]
 
 
 def test_event_key_bounds_accepted():

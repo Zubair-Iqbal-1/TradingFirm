@@ -99,7 +99,7 @@ def test_a_cached_analyze_can_still_pay_one_classifier_call(app):
         state.provider.calls.append({"label": kw["label"], "user": user})
         return LLMResult(data={"items": [{"index": 0, "relevance": "low", "sentiment": 0.0,
                                           "category": "other", "oneLine": "Noise.",
-                                          "eventKey": "aapl-listicle-mention"}]},
+                                          "eventKey": "aapl-listicle-mention", "eventDate": None}]},
                          model=MODEL, finish_reason="stop", duration_ms=1, usage={"cost": 0.004})
     state.provider.complete_structured = low
     out = post(client).json()

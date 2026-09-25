@@ -102,6 +102,7 @@ def test_twin_never_calls_prod_risk_shield():
     assert s.risk_shield_url == "http://risk-shield-dev:8003"
     assert "//risk-shield:" not in s.risk_shield_url
     assert s.llm_verdict_cache is False
+    assert s.llm_classifier_cache is False, "4.8b-ai: pinned off beside the verdict's flag"
 
 
 def test_analyze_defaults():
@@ -112,6 +113,12 @@ def test_analyze_defaults():
     assert fields["dossier_timeout"].default == 60.0
     assert fields["risk_shield_timeout"].default < fields["dossier_timeout"].default
     assert fields["llm_provider_order"].default == "anthropic"
+
+
+def test_classifier_cache_default_is_off():
+    """4.8b-ai: prod turns it on only after a live call shows a cacheWrite."""
+    assert Settings.model_fields["llm_classifier_cache"].default is False
+    assert Settings(_env_file=None).llm_classifier_cache is False
 
 
 def test_provider_order_is_normalized_and_an_empty_one_refuses_to_boot(monkeypatch):

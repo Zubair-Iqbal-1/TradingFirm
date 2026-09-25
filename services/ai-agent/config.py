@@ -164,6 +164,12 @@ class Settings(BaseSettings):
     # shows the prefix clears Sonnet 5's 1,024-token minimum (cacheWrite > 0).
     llm_verdict_cache: bool = False
 
+    # cache_control on the classifier's system block (Part 4.8b-ai). Off by
+    # default and in the twin; prod sets it only after a live call shows a
+    # cacheWrite (the prefix clears Sonnet 5's minimum; on Haiku it does
+    # nothing).
+    llm_classifier_cache: bool = False
+
     # The journal scorer's nightly slot (Part 4.5): 17:30 ET on XNYS sessions,
     # refreshing due tickers through data-engine. Off by default; the prod
     # compose block turns it on and the dev twin hard-codes it off

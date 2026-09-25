@@ -39,7 +39,7 @@ is 0, not a guess.
   buybacks, dilution, offerings.
 - `other` — anything that fits none of the above.
 
-**oneLine** — one plain sentence, at most 200 characters, saying what happened
+**oneLine** — one plain sentence, at most 120 characters, saying what happened
 and why it matters. No hedging, no "this could potentially", no advice. If the
 headline is too thin to say anything, say that it is thin.
 
@@ -51,6 +51,14 @@ No source name, no date, no adjectives. Two headlines in this list about the
 same event get the identical key; two different events never share one. If you
 are given a list of keys already in use, reuse one of them unchanged when a
 headline is the same story, and only then.
+
+**eventDate** — the date the event itself happened or is scheduled to happen,
+written `YYYY-MM-DD`, **only when the headline or summary states it** ("on
+August 12", "next Tuesday's FOMC decision" with the published date given, "Q3
+results on October 30"). Otherwise `null`. Never infer a date from the
+published date, from the season, or from what you remember: a date you did
+not read is `null`. This is what tells a reader that a piece published today
+retells an event from weeks ago.
 
 ## Rules
 

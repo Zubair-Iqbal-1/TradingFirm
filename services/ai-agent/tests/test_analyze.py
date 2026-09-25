@@ -107,7 +107,7 @@ class Provider:
             n = int(user.split("Classify these ")[1].split(" ")[0])
             return LLMResult(data={"items": [
                 {"index": i, "relevance": "high", "sentiment": -0.4, "category": "guidance",
-                 "oneLine": f"Line {i}.", "eventKey": f"aapl-story-{i}"} for i in range(n)]},
+                 "oneLine": f"Line {i}.", "eventKey": f"aapl-story-{i}", "eventDate": None} for i in range(n)]},
                 model=MODEL, finish_reason="stop", duration_ms=5,
                 usage={"input": 900, "output": 300, "cost": 0.0048})
         if self.raises is not None:
@@ -256,6 +256,22 @@ def test_cache_system_follows_the_setting(app, monkeypatch):
     client, _, state = app()
     assert post(client).status_code == 200
     assert state.provider.calls[0]["cache_system"] is True
+
+
+def test_analyze_passes_classifier_cache_flag(app, monkeypatch):
+    """4.8b-ai: the in-process classifier call carries LLM_CLASSIFIER_CACHE,
+    independently of the verdict's flag."""
+    world = World()
+    world.dossier = dossier(news=[news_item(0)])
+    client, _, state = app(world=world)
+    assert post(client).status_code == 200
+    calls = {c["label"]: c for c in state.provider.calls}
+    assert calls["headline_classify"]["cache_system"] is False and calls["verdict"]["cache_system"] is False
+    monkeypatch.setattr(main.settings, "llm_classifier_cache", True)
+    client, _, state = app(world=world)
+    assert post(client, fresh=True).status_code == 200
+    calls = {c["label"]: c for c in state.provider.calls}
+    assert calls["headline_classify"]["cache_system"] is True and calls["verdict"]["cache_system"] is False
 
 
 # ── Refusals before anything is spent ────────────────────────────

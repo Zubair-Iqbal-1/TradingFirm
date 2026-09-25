@@ -129,6 +129,7 @@ jobs:
               -e DATA_ENGINE_URL=http://data-engine-dev:8001
               -e RISK_SHIELD_URL=http://risk-shield-dev:8003
               -e LLM_VERDICT_CACHE=false
+              -e LLM_CLASSIFIER_CACHE=false
               -e JOURNAL_SCORING_ENABLED=false
               -e DATABASE_URL=postgresql+asyncpg://ci:ci@postgres:5432/tradingfirm_dev
               -e REDIS_URL=redis://redis:6379/1

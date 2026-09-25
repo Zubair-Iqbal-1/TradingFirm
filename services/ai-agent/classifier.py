@@ -24,7 +24,7 @@ that is checked here.
 
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Optional
 
 import cache
@@ -66,6 +66,15 @@ EVENT_KEY_RE = re.compile(EVENT_KEY_PATTERN)
 # keys already on the ticker's labelled headlines.
 KNOWN_KEYS_MAX = 40
 
+# Part 4.8b-ai: the date the event itself happened or is scheduled, only
+# when the headline or summary states it, else null — never inferred (spec
+# 4.8b decision 10 layer 3). data-engine keeps the same pattern as
+# SENTIMENT_EVENT_DATE_RE and accepts the field as optional, null stored as
+# null. A label cached before this part has no key and is served without one
+# (read as null), never re-classified.
+EVENT_DATE_PATTERN = r"^\d{4}-\d{2}-\d{2}$"
+EVENT_DATE_RE = re.compile(EVENT_DATE_PATTERN)
+
 ITEM_LIMITS = {
     "relevance": RELEVANCE,
     "category": CATEGORIES,
@@ -73,6 +82,7 @@ ITEM_LIMITS = {
     "oneLine": ONE_LINE_MAX,
     "model": MODEL_MAX,
     "eventKey": (EVENT_KEY_MAX, EVENT_KEY_PATTERN),
+    "eventDate": EVENT_DATE_PATTERN,
 }
 
 
@@ -83,6 +93,20 @@ def valid_event_key(value) -> bool:
         and len(value) <= EVENT_KEY_MAX
         and EVENT_KEY_RE.match(value) is not None
     )
+
+
+def valid_event_date(value) -> bool:
+    """The one check for `eventDate`, in and out (G1.5): null, or a real
+    calendar date written YYYY-MM-DD."""
+    if value is None:
+        return True
+    if not isinstance(value, str) or EVENT_DATE_RE.match(value) is None:
+        return False
+    try:
+        date.fromisoformat(value)
+    except ValueError:
+        return False
+    return True
 
 # Batch size. One call per batch, so this is also the coarseness of the spend.
 BATCH_MAX = 30
@@ -97,9 +121,12 @@ TITLE_MAX = 1000
 # response_format.json_schema.name, so it must match LABEL_RE.
 LABEL = "headline_classify"
 
-# Output budget for one batch: 30 one-line answers plus reasoning at effort
-# "low". Well under the 8,000 default, because this call never needs it.
-MAX_TOKENS = 4000
+# Output budget for one batch: since 4.8b-ai /analyze sends at most 15
+# headlines (events.prefilter) and asks for a 120-character oneLine, so
+# 2,500 covers 15 answers plus reasoning at effort "low" with room; the
+# 30-item route is unchanged and a full 30 still fits at the measured ~88
+# output tokens a headline.
+MAX_TOKENS = 2500
 
 SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -111,7 +138,8 @@ SCHEMA: dict[str, Any] = {
             "items": {
                 "type": "object",
                 "additionalProperties": False,
-                "required": ["index", "relevance", "sentiment", "category", "oneLine", "eventKey"],
+                "required": ["index", "relevance", "sentiment", "category", "oneLine", "eventKey",
+                             "eventDate"],
                 "properties": {
                     "index": {"type": "integer"},
                     "relevance": {"type": "string", "enum": list(RELEVANCE)},
@@ -119,6 +147,7 @@ SCHEMA: dict[str, Any] = {
                     "category": {"type": "string", "enum": list(CATEGORIES)},
                     "oneLine": {"type": "string"},
                     "eventKey": {"type": "string"},
+                    "eventDate": {"type": ["string", "null"]},
                 },
             },
         },
@@ -224,10 +253,14 @@ def validate_answer(data: dict, expected: int) -> list[dict]:
         if "\x00" in one_line:
             raise BatchRejected(f"item {index}: oneLine contains NUL")
 
-        # Last on purpose: every older rule keeps reporting its own reason.
+        # Every older rule keeps reporting its own reason, so these two come last.
         event_key = raw.get("eventKey")
         if not valid_event_key(event_key):
             raise BatchRejected(f"item {index}: eventKey is not a 2-8 word lowercase slug")
+
+        # 4.8b-ai: required, a real YYYY-MM-DD or null; a missing key is a break
+        if "eventDate" not in raw or not valid_event_date(raw.get("eventDate")):
+            raise BatchRejected(f"item {index}: eventDate is not YYYY-MM-DD or null")
 
         by_index[index] = {
             "relevance": relevance,
@@ -235,6 +268,7 @@ def validate_answer(data: dict, expected: int) -> list[dict]:
             "category": category,
             "oneLine": one_line.strip()[:ONE_LINE_MAX],
             "eventKey": event_key,
+            "eventDate": raw.get("eventDate"),
         }
 
     return [by_index[i] for i in range(expected)]
@@ -252,8 +286,12 @@ async def _call_model(
     cap: int,
     now: Optional[datetime] = None,
     known_event_keys: Optional[list[str]] = None,
+    cache_system: bool = False,
 ) -> LLMResult:
     """One structured call, with the classifier's own reservation around it.
+    `cache_system` (4.8b-ai, LLM_CLASSIFIER_CACHE) marks the system prompt
+    for the provider's prompt cache exactly as the verdict's flag does; the
+    prompt carries no request text, so the marked block is byte-stable.
 
     The `finally`-free shape is deliberate: only the named pre-wire refusals
     release, and everything else keeps the reservation, because a request
@@ -278,6 +316,7 @@ async def _call_model(
             label=LABEL,
             model=model,
             max_tokens=MAX_TOKENS,
+            cache_system=cache_system,
         )
     except (LLMNotConfigured, LLMCooledDown, LLMCapExceeded, ValueError):
         # Pre-wire, every one of them: no key (the client is not even built),
@@ -300,13 +339,17 @@ async def classify(
     cap: int,
     now: Optional[datetime] = None,
     known_event_keys: Optional[list[str]] = None,
+    cache_system: bool = False,
 ) -> tuple[list[dict], Optional[LLMResult]]:
     """Classify `headlines`, returning (one classification per headline,
     the LLMResult or None when everything came from cache).
 
     Order: digest -> cache read -> one call for the misses -> validate ->
     cache write. Write-back is the route's job, because it covers cached
-    items too (decision 6b).
+    items too (decision 6b). A label cached before 4.8b-ai has no
+    `eventDate` key: it is served as it is (readers take the key as null) and
+    never re-classified, and its write-back payload still lacks the key, so
+    data-engine keeps the field absent (spec 4.8b X15, 4.8b-ai X6).
     """
     digests = [cache.headline_digest(h["title"], h.get("url")) for h in headlines]
     cached = await cache.get_classifications(redis, sorted(set(digests)))
@@ -332,7 +375,7 @@ async def classify(
 
     result = await _call_model(
         provider, redis, memory_cap, to_send, model=model, cap=cap, now=now,
-        known_event_keys=known_event_keys,
+        known_event_keys=known_event_keys, cache_system=cache_system,
     )
     # The call is paid for whatever it answered, so its cost is counted
     # before the answer is judged (Part 4.4; 4.2 counted it after, which left

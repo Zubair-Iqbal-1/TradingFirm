@@ -298,6 +298,7 @@ services:
       DATA_ENGINE_URL: http://data-engine-dev:8001  # hard-coded: never prod's news_items (4.2)
       RISK_SHIELD_URL: http://risk-shield-dev:8003  # hard-coded: never prod's risk-shield (4.4)
       LLM_VERDICT_CACHE: "false"
+      LLM_CLASSIFIER_CACHE: "false"                 # 4.8b-ai: pinned off beside the verdict's flag
       JOURNAL_SCORING_ENABLED: "false"              # hard-coded: no scheduled scorer on the twin (4.5)
     command: uvicorn main:app --host 0.0.0.0 --port 8004 --reload
     restart: "no"
