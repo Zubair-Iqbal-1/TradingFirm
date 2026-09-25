@@ -1174,3 +1174,11 @@ On all four pre-expiry nights the 00:15 reading sat at ES −0.85…−0.95 / NQ
 **Why:** the fixed C+D table of 2026-09-24 was to be posted and waited on; the agent read "then one commit with the variant" as leave to commit in the same turn, and `a46b239` landed before the table had been reviewed. The commit reconciled and stands (no force push), but the review happened after the fact.
 
 **Supersedes:** N/A (extends 2026-09-23's go-per-step rule from prod steps to commits that follow an experiment).
+
+---
+
+## 2026-09-25 — a46b239 deploys as is; swing-low floor, the tie rule and small samples go to a journal review
+
+**Decision:** `a46b239` deploys as is. Three questions are deferred to a journal review after 2–3 weeks of v3 rows: the swing-low stop floor ("a stop never sits above the newest swing low"; the 2026-09-24 rerun gave v3 valid 5 → 3 of 11, AAL's stop 12.81 → 12.13; the build was discarded uncommitted), the tie rule (`brokeAbove ≥ heldAbove` looks a support zone through, as coded), and the small from-above samples it reads (AAPL's three support zones carry 1, 2 and 3 from-above episodes). The journal judges all three together.
+
+**Supersedes:** N/A.
