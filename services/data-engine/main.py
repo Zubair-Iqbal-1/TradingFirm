@@ -517,11 +517,19 @@ async def refresh_ticker_bars(ticker: str) -> dict:
     df_hourly = app.state.provider.extract_ticker_df(bulk_hourly, ticker)
     daily_bars = bar_records_from_df(df_daily)
     hourly_bars = bar_records_from_df(df_hourly)
+    # Part 4.8b-de: the open session's daily row and an unfinished hourly row
+    # are never stored (spec 4.8b decision 15); the dossier's stale refresh
+    # comes through here too.
+    from bar_session import INTERVAL_DAILY, INTERVAL_HOURLY, drop_open_session_bars, utc_now
+    now = utc_now()
+    daily_bars, _open_daily = drop_open_session_bars(daily_bars, INTERVAL_DAILY, now)
+    hourly_bars, _open_hourly = drop_open_session_bars(hourly_bars, INTERVAL_HOURLY, now)
 
     daily_count = await upsert_bars(app.state.db_pool, ticker, "1d", daily_bars)
     hourly_count = await upsert_bars(app.state.db_pool, ticker, "1h", hourly_bars)
 
     del bulk_daily, bulk_hourly, df_daily, df_hourly, daily_bars, hourly_bars
+    del _open_daily, _open_hourly
     gc.collect()
 
     # Earnings report dates (Part 2.3): runs after the bars are stored, so

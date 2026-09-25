@@ -55,7 +55,7 @@ docker exec tf-risk-shield-dev pytest tests/test_config.py tests/test_cache.py t
 Tests run inside `tf-data-engine-dev` (host pandas ≠ pinned version). It is a separate container from prod `tf-data-engine`, so prod keeps running: fixture provider, its own database `tradingfirm_dev`, Redis DB 1, pytest baked in via the Dockerfile `dev` stage. Rebuild with `--build` after changing `requirements*.txt`:
 ```bash
 docker compose --profile dev up -d data-engine-dev
-docker exec tf-data-engine-dev pytest tests/test_bars_endpoint.py tests/test_bars_store.py tests/test_cooldowns.py tests/test_dossier.py tests/test_earnings_dates.py tests/test_earnings_reaction.py tests/test_edgar.py tests/test_finnhub_fetchers.py tests/test_fixture_provider.py tests/test_indicators.py tests/test_indicators_endpoint.py tests/test_levels.py tests/test_news_ingest.py tests/test_news_market.py tests/test_news_sentiment.py tests/test_provider_factory.py tests/test_refresh_endpoint.py tests/test_scanner_pipeline.py -v --cov=. --cov-report=term-missing
+docker exec tf-data-engine-dev pytest tests/test_bar_session.py tests/test_bars_endpoint.py tests/test_bars_store.py tests/test_cooldowns.py tests/test_dossier.py tests/test_earnings_dates.py tests/test_earnings_reaction.py tests/test_edgar.py tests/test_finnhub_fetchers.py tests/test_fixture_provider.py tests/test_indicators.py tests/test_indicators_endpoint.py tests/test_levels.py tests/test_news_ingest.py tests/test_news_market.py tests/test_news_sentiment.py tests/test_provider_factory.py tests/test_refresh_endpoint.py tests/test_scanner_pipeline.py -v --cov=. --cov-report=term-missing
 ./scripts/dev-db.sh                  # once: create tradingfirm_dev + apply migrations (only needed to poke the dev API on :8011)
 ```
 

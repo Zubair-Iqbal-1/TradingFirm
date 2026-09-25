@@ -9,3 +9,7 @@ yfinance==1.5.1
 finvizfinance==1.3.0
 numpy==2.3.0
 pandas==2.3.0
+# Part 4.8b-de: XNYS sessions and early closes, so the open session's bar is
+# never stored (bar_session.py). The pin risk-shield (3.4) and ai-agent (4.5)
+# already use; built lazily with narrow bounds, never at import (G8).
+exchange_calendars==4.13.2

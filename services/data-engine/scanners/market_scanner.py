@@ -322,8 +322,12 @@ class MarketScanner:
         if self.db_pool is None or not winners:
             return
 
+        from bar_session import drop_open_session_bars, utc_now
         from db import bar_records_from_df, upsert_bars
 
+        # Part 4.8b-de: ranking above used today's partial bar in memory; the
+        # save drops it (spec 4.8b decision 15).
+        now = utc_now()
         for ticker in winners:
             for interval, frame in (
                 ("1d", daily_frames.get(ticker)),
@@ -332,9 +336,8 @@ class MarketScanner:
                 if frame is None:
                     continue
                 try:
-                    await upsert_bars(
-                        self.db_pool, ticker, interval, bar_records_from_df(frame)
-                    )
+                    kept, _open = drop_open_session_bars(bar_records_from_df(frame), interval, now)
+                    await upsert_bars(self.db_pool, ticker, interval, kept)
                 except Exception as e:
                     logger.warning(f"Bar persist failed for {ticker} ({interval}): {e}")
 

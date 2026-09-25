@@ -547,3 +547,27 @@ class TestPipelinePersistsWinnerBars:
 
         assert mock_upsert.call_count == 4  # 2 intervals x 2 runs, no dedup
         print("  repeat persist calls re-upsert every time (no client-side cache)")
+
+
+@pytest.mark.asyncio
+async def test_scanner_persist_drops_open_session_bar(monkeypatch):
+    """Part 4.8b-de (spec 4.8b decision 15): the scan ranks on today's partial
+    bar in memory; the save drops it. Frozen at 13:00 ET on 2026-09-24."""
+    import bar_session
+    from scanners.market_scanner import MarketScanner
+
+    monkeypatch.setattr(bar_session, "utc_now", lambda: datetime(2026, 9, 24, 17, 0, tzinfo=timezone.utc))
+    day_index = pd.DatetimeIndex([datetime(2026, 9, 22), datetime(2026, 9, 23), datetime(2026, 9, 24)])
+    hour_index = pd.DatetimeIndex([datetime(2026, 9, 24, 15, 30, tzinfo=timezone.utc),
+                                   datetime(2026, 9, 24, 16, 30, tzinfo=timezone.utc)])
+    cols = {"Open": 1.0, "High": 1.0, "Low": 1.0, "Close": 1.0, "Volume": 1}
+    daily_frames = {"GOOD": pd.DataFrame(cols, index=day_index)}
+    hourly_frames = {"GOOD": pd.DataFrame(cols, index=hour_index)}
+    scanner = MarketScanner(MagicMock(), db_pool=MagicMock())
+
+    with patch("db.upsert_bars", new=AsyncMock(return_value=1)) as mock_upsert:
+        await scanner._persist_winner_bars({"GOOD": {}}, daily_frames, hourly_frames)
+
+    stored = {c.args[2]: [r["ts"] for r in c.args[3]] for c in mock_upsert.call_args_list}
+    assert stored["1d"] == [datetime(2026, 9, 22), datetime(2026, 9, 23)]
+    assert stored["1h"] == [datetime(2026, 9, 24, 15, 30, tzinfo=timezone.utc)]

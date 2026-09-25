@@ -165,3 +165,33 @@ async def test_refresh_429s_distinguishable_for_ai_agent():
         await main.refresh_stock("AMD")
     assert provider.value.status_code == 429
     assert not (provider.value.headers or {}).get("Retry-After")
+
+
+@pytest.mark.asyncio
+async def test_refresh_drops_open_session_bar(monkeypatch):
+    """Part 4.8b-de (spec 4.8b decision 15): refreshed while the fixture's last
+    session is still trading, that session's daily row and its unfinished
+    hourly rows are not stored. The dossier's stale refresh is this helper."""
+    from datetime import datetime, timedelta, timezone
+
+    import bar_session
+
+    pool, conn = _make_pool()
+    main.app.state.db_pool = pool
+    provider = FixtureProvider()
+    daily_df = provider.extract_ticker_df(await provider.download_daily(["AAPL"]), "AAPL")
+    hourly_df = provider.extract_ticker_df(await provider.download_hourly(["AAPL"]), "AAPL")
+    last_day = daily_df.index[-1].date()
+    times = bar_session.session_times(last_day)
+    assert times is not None, "the fixture's last daily row is a session"
+    now = times[0] + timedelta(minutes=45)          # 45 min into that session
+    monkeypatch.setattr(bar_session, "utc_now", lambda: now)
+
+    result = await main.refresh_stock("AAPL")
+
+    hourly_open = sum(1 for ts in hourly_df.index
+                      if ts.to_pydatetime().astimezone(timezone.utc) + timedelta(hours=1) > now)
+    assert result["dailyBars"] == len(daily_df) - 1
+    assert result["hourlyBars"] == len(hourly_df) - hourly_open
+    daily_rows = conn.executemany.await_args_list[0].args[1]
+    assert all(row[2].date() != last_day for row in daily_rows)

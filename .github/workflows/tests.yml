@@ -42,6 +42,7 @@ jobs:
               -e EDGAR_USER_AGENT=
               -e ALPHAVANTAGE_API_KEY=
             tests: >-
+              tests/test_bar_session.py
               tests/test_bars_endpoint.py
               tests/test_bars_store.py
               tests/test_cooldowns.py
